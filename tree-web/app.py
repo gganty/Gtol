@@ -1,10 +1,12 @@
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Any, Mapping, Sequence, Callable, Optional
+from typing import Any, Mapping, Sequence, Callable, Optional, Iterable, List
 import numpy as np
 import pandas as pd
 import json
+import gzip
+import io
 import asyncio
 import queue
 import threading
@@ -57,6 +59,11 @@ def api_graph():
 @app.get("/api/graph/stream")
 async def api_graph_stream():
     """Stream graph computation with progress updates via Server-Sent Events."""
+
+    def chunk(seq: Sequence[Any], size: int) -> Iterable[List[Any]]:
+        for i in range(0, len(seq), size):
+            yield list(seq[i:i + size])
+
     async def generate():
         progress_queue = queue.Queue()
         computation_done = threading.Event()
@@ -70,19 +77,19 @@ async def api_graph_stream():
         
         # Store result for final fetch
         result_storage = {"nodes": None, "links": None, "ready": False}
-        
+
         def compute():
             try:
                 nodes, links = build_graph(progress_callback=callback)
                 # accept DataFrames as well
                 if isinstance(nodes, pd.DataFrame): nodes = nodes.to_dict("records")
                 if isinstance(links, pd.DataFrame): links = links.to_dict("records")
-                
+
                 # Normalize the data
                 result_storage["nodes"] = _norm_nodes(nodes)
                 result_storage["links"] = _norm_links(links)
                 result_storage["ready"] = True
-                
+
                 # Send completion message (without data to avoid huge payload)
                 progress_queue.put({
                     "stage": "complete",
@@ -127,25 +134,49 @@ async def api_graph_stream():
                         while not result_storage["ready"] and waited < max_wait:
                             await asyncio.sleep(0.1)
                             waited += 1
-                        
-                        if result_storage["ready"]:
-                            # Send data in chunks to avoid huge single message
-                            # For very large datasets, we'll send it all at once but with proper error handling
-                            try:
-                                data_message = {
-                                    "stage": "data",
-                                    "nodes": result_storage["nodes"],
-                                    "links": result_storage["links"]
-                                }
-                                yield f"data: {json.dumps(data_message)}\n\n"
-                            except Exception as e:
-                                # If serialization fails, send error
-                                error_msg = {"stage": "error", "progress": 0.0, "error": f"Data serialization error: {str(e)}"}
-                                yield f"data: {json.dumps(error_msg)}\n\n"
-                        else:
+
+                        if not result_storage["ready"]:
                             error_msg = {"stage": "error", "progress": 0.0, "error": "Data not ready"}
                             yield f"data: {json.dumps(error_msg)}\n\n"
-                        
+                            break
+
+                        # Stream chunks to keep payload sizes manageable for cosmograph
+                        nodes = result_storage["nodes"] or []
+                        links = result_storage["links"] or []
+                        node_total = len(nodes)
+                        link_total = len(links)
+                        chunk_size = 50_000
+
+                        # Send node chunks
+                        sent_nodes = 0
+                        for idx, node_chunk in enumerate(chunk(nodes, chunk_size)):
+                            sent_nodes += len(node_chunk)
+                            progress = 95.0 + 2.0 * (sent_nodes / max(1, node_total))
+                            data_message = {
+                                "stage": "nodes_chunk",
+                                "index": idx,
+                                "total": node_total,
+                                "progress": min(progress, 99.0),
+                                "nodes": node_chunk,
+                            }
+                            yield f"data: {json.dumps(data_message)}\n\n"
+
+                        # Send link chunks
+                        sent_links = 0
+                        for idx, link_chunk in enumerate(chunk(links, chunk_size)):
+                            sent_links += len(link_chunk)
+                            progress = 97.0 + 2.0 * (sent_links / max(1, link_total))
+                            data_message = {
+                                "stage": "links_chunk",
+                                "index": idx,
+                                "total": link_total,
+                                "progress": min(progress, 99.9),
+                                "links": link_chunk,
+                            }
+                            yield f"data: {json.dumps(data_message)}\n\n"
+
+                        # Signal completion
+                        yield f"data: {json.dumps({'stage': 'data_complete', 'progress': 100.0})}\n\n"
                         await asyncio.sleep(0.1)
                         break
                     elif update.get("stage") == "error":
@@ -184,5 +215,38 @@ async def api_graph_stream():
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }
+    )
+
+
+@app.get("/api/graph/binary")
+def api_graph_binary():
+    """Return the entire graph as a pre-gzipped binary payload.
+
+    This avoids EventSource chunking and lets the client stream a single
+    compressed file it can fully decompress before handing data to Cosmograph.
+    """
+    nodes, links = build_graph()
+    if isinstance(nodes, pd.DataFrame):
+        nodes = nodes.to_dict("records")
+    if isinstance(links, pd.DataFrame):
+        links = links.to_dict("records")
+
+    payload = json.dumps({
+        "nodes": _norm_nodes(nodes),
+        "links": _norm_links(links)
+    }).encode("utf-8")
+
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb") as f:
+        f.write(payload)
+    compressed = buf.getvalue()
+
+    return StreamingResponse(
+        iter([compressed]),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(len(compressed)),
+            "Content-Disposition": "attachment; filename=graph.json.gz"
+        },
     )
 
