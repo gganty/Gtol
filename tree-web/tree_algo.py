@@ -13,8 +13,8 @@ def _log(*args: object) -> None:
 
 # Configuration constants
 
-NEWICK: str = "/Users/gushchin_a/Downloads/UShER SARS-CoV-2 latest.nwk"
-#  NEWICK: str = "/Users/gushchin_a/Downloads/Chond 10Cal 10k TreeSet.tre"
+#  NEWICK: str = "/Users/gushchin_a/Downloads/UShER SARS-CoV-2 latest.nwk"
+NEWICK: str = "/Users/gushchin_a/Downloads/Chond 10Cal 10k TreeSet.tre"
 params = dict[str, float](
     x_scale=140.0,
     min_level_gap=56.0,
