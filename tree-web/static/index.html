@@ -76,6 +76,8 @@
         'parsing': 'Parsing tree',
         'layout': 'Computing layout',
         'rendering': 'Preparing data',
+        'compressing': 'Compressing result',
+        'downloading': 'Downloading graph',
         'complete': 'Complete',
         'error': 'Error'
       };
@@ -93,84 +95,83 @@
     }
 
     async function main() {
-      updateProgress('reading', 0);
+      updateProgress('starting', 0);
 
-      const eventSource = new EventSource('/api/graph/stream');
-      let nodes = null;
-      let links = null;
+      try {
+        // 1. Start Job
+        const startResp = await fetch('/api/v2/graph/start', { method: 'POST' });
+        if (!startResp.ok) throw new Error(`Start job failed: ${startResp.status}`);
+        const { job_id } = await startResp.json();
+        console.log("Job started:", job_id);
 
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
+        // 2. Monitor Progress via SSE
+        await monitorProgress(job_id);
 
-          if (data.stage === 'error') {
-            eventSource.close();
-            updateProgress('error', 0);
-            logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">${data.error || 'Unknown error'}</div>`;
-            return;
-          }
+        // 3. Download Result
+        updateProgress('downloading', 98);
+        const resResp = await fetch(`/api/v2/graph/${job_id}/result`);
+        if (!resResp.ok) throw new Error(`Result fetch failed: ${resResp.status}`);
 
-          if (data.stage === 'complete') {
-            // Completion message received, wait for data message
-            updateProgress('rendering', 95);
-            return;
-          }
+        // Decompress stream
+        const blob = await resResp.blob();
+        const ds = new DecompressionStream('gzip');
+        const decompressedStream = blob.stream().pipeThrough(ds);
+        const text = await new Response(decompressedStream).text();
 
-          if (data.stage === 'data') {
-            // Data message received
-            eventSource.close();
-            nodes = data.nodes;
-            links = data.links;
-            updateProgress('rendering', 97);
+        updateProgress('parsing', 99);
+        const payload = JSON.parse(text);
 
-            // Start frontend rendering
-            setTimeout(() => {
-              updateProgress('rendering', 98);
-              const graph = new Cosmograph(el, {
-                disableSimulation: true,        // freeze layout
-                idField: 'id', sourceField: 'source', targetField: 'target',
-                backgroundColor: '#0b0f14',
-                nodeSize: n => n.pixel_size || 2,
-                nodeColor: n => n.color || '#5ac8fa',
-                nodeLabelAccessor: n => n.label,
-                hoveredNodeLabelColor: '#fff',
-                linkColor: '#3a3f44', linkOpacity: 0.35,
-              });
-              updateProgress('rendering', 99);
-              graph.fitView();
-              graph.setData(nodes, links);
-              updateProgress('complete', 100);
-              setTimeout(() => {
-                logEl.innerHTML = `<div>Rendered: ${nodes.length.toLocaleString()} nodes, ${links.length.toLocaleString()} links</div>`;
-              }, 500);
-            }, 100);
-            return;
-          }
+        renderGraph(payload.nodes, payload.links);
 
-          // Update progress for intermediate stages
-          updateProgress(data.stage, data.progress);
-        } catch (e) {
-          console.error('Error parsing event data:', e, event.data);
-        }
-      };
-
-      eventSource.onerror = (error) => {
-        console.error('EventSource error:', error);
-        // Only show error if connection is actually closed (readyState 2)
-        if (eventSource.readyState === EventSource.CLOSED) {
-          // Check if we already have the data
-          if (nodes && links) {
-            // We have the data, connection just closed normally
-            return;
-          }
-          eventSource.close();
-          updateProgress('error', 0);
-          logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">Connection closed unexpectedly</div>`;
-        }
-        // For other states (CONNECTING, OPEN), just log - connection might recover
-      };
+      } catch (err) {
+        console.error(err);
+        updateProgress('error', 0);
+        logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">${err.message}</div>`;
+      }
     }
-    
+
+    function monitorProgress(job_id) {
+      return new Promise((resolve, reject) => {
+        const evtSource = new EventSource(`/api/v2/graph/${job_id}/progress`);
+
+        evtSource.onmessage = (e) => {
+          const data = JSON.parse(e.data);
+          if (data.progress !== undefined) {
+            updateProgress(data.stage, data.progress);
+          }
+          if (data.stage === 'error') {
+            evtSource.close();
+            reject(new Error(data.error || "Unknown job error"));
+          } else if (data.stage === 'complete') {
+            evtSource.close();
+            resolve();
+          }
+        };
+
+        evtSource.onerror = () => {
+          evtSource.close();
+          reject(new Error("Progress stream disconnected"));
+        };
+      });
+    }
+
+    function renderGraph(nodes, links) {
+      updateProgress('rendering', 100);
+      const graph = new Cosmograph(el, {
+        disableSimulation: true,
+        idField: 'id', sourceField: 'source', targetField: 'target',
+        backgroundColor: '#0b0f14',
+        nodeSize: n => n.pixel_size || 2,
+        nodeColor: n => n.color || '#5ac8fa',
+        nodeLabelAccessor: n => n.label,
+        hoveredNodeLabelColor: '#fff',
+        linkColor: '#3a3f44', linkOpacity: 0.35,
+      });
+      graph.fitView();
+      graph.setData(nodes, links);
+      logEl.innerHTML = `<div>Rendered: ${nodes.length.toLocaleString()} nodes, ${links.length.toLocaleString()} links</div>`;
+    }
+
     main().catch(e => {
       console.error(e);
       updateProgress('error', 0);

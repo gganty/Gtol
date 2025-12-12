@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Any, Mapping, Sequence, Callable, Optional
+from typing import Any, Mapping, Sequence, Callable, Optional, List, Dict
 import numpy as np
 import pandas as pd
 import json
@@ -186,3 +186,173 @@ async def api_graph_stream():
         }
     )
 
+# --- Async Job Pattern (V2) ---
+
+import uuid
+import time
+import gzip
+import io
+
+class Job:
+    def __init__(self):
+        self.id = str(uuid.uuid4())
+        self.created_at = time.time()
+        self.progress_queue = queue.Queue()
+        self.result: Optional[bytes] = None
+        self.error: Optional[str] = None
+        self.done = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+
+    def post_progress(self, stage: str, progress: float):
+        try:
+            self.progress_queue.put({"stage": stage, "progress": progress}, timeout=0.1)
+        except queue.Full:
+            pass
+
+JOBS: Dict[str, Job] = {}
+
+def _cleanup_old_jobs():
+    """Remove jobs older than 1 hour."""
+    now = time.time()
+    to_del = [jid for jid, job in JOBS.items() if now - job.created_at > 3600]
+    for jid in to_del:
+        JOBS.pop(jid, None)
+
+@app.post("/api/v2/graph/start")
+def start_graph_job():
+    _cleanup_old_jobs()
+    job = Job()
+    JOBS[job.id] = job
+
+    def compute():
+        try:
+            def callback(stage: str, progress: float):
+                job.post_progress(stage, progress)
+
+            # 1. Build Graph (returns DataFrames)
+            nodes, links = build_graph(progress_callback=callback)
+            
+            # 2. Stream to Gzip Buffer with SAFE serialization
+            job.post_progress("compressing", 95.0)
+            
+            buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+                # Helper to write string as utf-8 bytes
+                def write(s):
+                    gz.write(s.encode("utf-8"))
+
+                write('{"nodes":[')
+                
+                # Stream nodes
+                chunk_size = 50000
+                total_nodes = len(nodes)
+                for i in range(0, total_nodes, chunk_size):
+                    chunk_df = nodes.iloc[i:i+chunk_size]
+                    # Convert to dict records -> norm -> json
+                    chunk_records = chunk_df.to_dict("records")
+                    norm_records = _norm_nodes(chunk_records)
+                    
+                    # Dump to JSON string and strip outer []
+                    json_str = json.dumps(norm_records)
+                    inner = json_str[1:-1]
+                    
+                    if i > 0 and len(inner) > 0:
+                        write(",")
+                    write(inner)
+                    
+                    # Report progress occasionally during compression
+                    if i % 250000 == 0:
+                        job.post_progress("compressing", 95.0 + 4.9 * (i / total_nodes))
+                        time.sleep(0) # yield GIL
+
+                write('],"links":[')
+                
+                # Stream links
+                total_links = len(links)
+                for i in range(0, total_links, chunk_size):
+                    chunk_df = links.iloc[i:i+chunk_size]
+                    chunk_records = chunk_df.to_dict("records")
+                    norm_records = _norm_links(chunk_records)
+                    
+                    json_str = json.dumps(norm_records)
+                    inner = json_str[1:-1]
+                    
+                    if i > 0 and len(inner) > 0:
+                        write(",")
+                    write(inner)
+
+                write(']}')
+
+            job.result = buf.getvalue()
+            job.post_progress("complete", 100.0)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            job.error = str(e)
+            job.post_progress("error", 0.0)
+        finally:
+            job.done.set()
+
+    job.thread = threading.Thread(target=compute, daemon=True)
+    job.thread.start()
+    return {"job_id": job.id}
+
+@app.get("/api/v2/graph/{job_id}/progress")
+async def get_job_progress(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return {"error": "Job not found"}, 404
+
+    async def generate():
+        while True:
+            try:
+                # Check for completion
+                if job.done.is_set() and job.progress_queue.empty():
+                    yield f"data: {json.dumps({'stage': 'complete', 'progress': 100.0})}\n\n"
+                    break
+
+                try:
+                    update = job.progress_queue.get(timeout=0.5)
+                    yield f"data: {json.dumps(update)}\n\n"
+                    if update.get("stage") == "error":
+                        break
+                except queue.Empty:
+                    if job.done.is_set():
+                         yield f"data: {json.dumps({'stage': 'complete', 'progress': 100.0})}\n\n"
+                         break
+                    await asyncio.sleep(0.1)
+            except Exception:
+                break
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+    )
+
+@app.get("/api/v2/graph/{job_id}/result")
+def get_job_result(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return {"error": "Job not found"}, 404
+    
+    if not job.done.is_set():
+         return {"error": "Job not ready"}, 400
+         
+    if job.error:
+        return {"error": job.error}, 500
+
+    if not job.result:
+        return {"error": "No result data"}, 500
+
+    return StreamingResponse(
+        iter([job.result]),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(len(job.result)),
+            "Content-Disposition": "attachment; filename=graph.json.gz",
+            # "Content-Encoding": "gzip", <--- REMOVED TO PREVENT AUTO-DECOMPRESS
+            "Cache-Control": "no-store",
+        }
+    )
