@@ -115,6 +115,60 @@
     let linksReceived = 0;
 
     async function main() {
+      // Try the binary gzip endpoint first for less overhead on huge graphs
+      try {
+        const binaryLoaded = await loadBinaryGraph();
+        if (binaryLoaded) {
+          renderGraph();
+          return;
+        }
+      } catch (err) {
+        console.warn('Binary load failed, falling back to SSE', err);
+      }
+
+      // Fall back to SSE streaming if binary transfer is not supported
+      await streamGraph();
+    }
+
+    async function loadBinaryGraph() {
+      updateProgress('reading', 0);
+
+      const response = await fetch('/api/graph/binary');
+      if (!response.ok || !response.body) {
+        throw new Error(`Binary fetch failed: ${response.status}`);
+      }
+
+      const total = Number(response.headers.get('content-length')) || 0;
+      const reader = response.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          loaded += value.length;
+          if (total) {
+            const pct = Math.min(99, (loaded / total) * 80);
+            updateProgress('reading', pct);
+          }
+        }
+      }
+
+      // Reconstruct the stream from chunks and decompress using the Web Streams API.
+      // Content-Encoding is still gzip, so we explicitly opt into decompression.
+      const binary = new Blob(chunks).stream();
+      const decompressed = binary.pipeThrough(new DecompressionStream('gzip'));
+      const text = await new Response(decompressed).text();
+      const payload = JSON.parse(text);
+
+      updateProgress('rendering', 99);
+      hydrateGraphFromPayload(payload);
+      return true;
+    }
+
+    async function streamGraph() {
       updateProgress('reading', 0);
 
       const evtSource = new EventSource("/api/graph/stream");
@@ -166,7 +220,7 @@
         } else if (stage === 'links_chunk') {
           const chunk = data.links;
           // Just push for now, links are usually strings/ids
-          // Optimization: If sources/targets are indices, use Int32Array. 
+          // Optimization: If sources/targets are indices, use Int32Array.
           // But backend sends IDs (strings/ints).
           for (let i = 0; i < chunk.length; i++) {
             const link = chunk[i];
@@ -190,6 +244,40 @@
         logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">Connection lost</div>`;
         evtSource.close();
       };
+    }
+
+    function hydrateGraphFromPayload(payload) {
+      const { nodes = [], links = [] } = payload;
+
+      nodeCount = nodes.length;
+      linkCount = links.length;
+      nodesReceived = nodeCount;
+      linksReceived = linkCount;
+
+      n_x = new Float32Array(nodeCount);
+      n_y = new Float32Array(nodeCount);
+      n_size = new Float32Array(nodeCount);
+
+      for (let i = 0; i < nodeCount; i++) {
+        const node = nodes[i];
+        n_x[i] = node.x;
+        n_y[i] = node.y;
+        n_size[i] = node.pixel_size || node.size || 1;
+        n_ids[i] = node.id;
+        n_cards[i] = node.color;
+        n_labels[i] = node.label || null;
+      }
+
+      // Allocate link arrays once
+      l_sources = new Array(linkCount);
+      l_targets = new Array(linkCount);
+      l_colors = new Array(linkCount);
+      for (let i = 0; i < linkCount; i++) {
+        const link = links[i];
+        l_sources[i] = link.source;
+        l_targets[i] = link.target;
+        l_colors[i] = link.color;
+      }
     }
 
     function renderGraph() {

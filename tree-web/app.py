@@ -261,7 +261,13 @@ def api_graph_binary():
         media_type="application/octet-stream",
         headers={
             "Content-Length": str(len(compressed)),
-            "Content-Disposition": "attachment; filename=graph.json.gz"
+            "Content-Disposition": "attachment; filename=graph.json.gz",
+            # Hint browsers that this payload is intentionally gzipped so the
+            # frontend can opt-in to streaming decompression. We avoid letting
+            # the HTTP stack auto-decompress to keep memory usage predictable
+            # for huge payloads.
+            "Content-Encoding": "gzip",
+            "Cache-Control": "no-store",
         },
     )
 
