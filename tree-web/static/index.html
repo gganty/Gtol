@@ -66,7 +66,6 @@
 
   <script type="module">
     import { Cosmograph } from "https://esm.sh/@cosmograph/cosmograph@1.3.1?bundle";
-    import pako from "https://esm.sh/pako@2.1.0";
 
     const el = document.getElementById('mount');
     const logEl = document.getElementById('log');
@@ -95,70 +94,157 @@
       `;
     }
 
+    // Structure of Arrays to save memory
+    // We will allocate them once we know the total count from the first chunk
+    let nodeCount = 0;
+    let linkCount = 0;
+
+    // Node arrays
+    let n_x, n_y, n_size;
+    let n_ids = [];    // Strings/Ints
+    let n_cards = [];  // Colors/Kinds (can be optimized if few unique values, but array is okay)
+    let n_labels = []; // Strings
+
+    // Link arrays
+    let l_sources = []; // Int indices? Or IDs? Cosmograph needs IDs if they are not indices.
+    let l_targets = [];
+    let l_colors = [];
+
+    // Temporary storage until we allocate (though usually we get total in first chunk)
+    let nodesReceived = 0;
+    let linksReceived = 0;
+
     async function main() {
       updateProgress('reading', 0);
 
-      const resp = await fetch('/api/graph/binary');
-      if (!resp.ok || !resp.body) {
-        updateProgress('error', 0);
-        logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">Download failed (${resp.status})</div>`;
-        return;
-      }
+      const evtSource = new EventSource("/api/graph/stream");
 
-      const contentLength = Number(resp.headers.get('content-length')) || 0;
-      const reader = resp.body.getReader();
-      let received = 0;
-      const chunks = [];
+      evtSource.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        const stage = data.stage;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) {
-          chunks.push(value);
-          received += value.length;
-          const progress = contentLength ? (received / contentLength) * 90 : 60;
-          updateProgress('rendering', progress);
+        if (stage === 'error') {
+          console.error(data.error);
+          logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">Error: ${data.error}</div>`;
+          evtSource.close();
+          return;
         }
-      }
 
-      const merged = new Uint8Array(received);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
+        if (data.progress !== undefined) {
+          updateProgress(stage, data.progress);
+        }
 
-      updateProgress('rendering', 91);
-      const decompressed = pako.ungzip(merged);
-      updateProgress('rendering', 94);
-      const decoded = new TextDecoder('utf-8').decode(decompressed);
-      updateProgress('rendering', 96);
-      const payload = JSON.parse(decoded);
+        if (stage === 'nodes_chunk') {
+          // Initialize arrays on first chunk
+          if (!n_x) {
+            nodeCount = data.total;
+            n_x = new Float32Array(nodeCount);
+            n_y = new Float32Array(nodeCount);
+            n_size = new Float32Array(nodeCount);
+            // Pre-allocate arrays to avoid resizing? JS arrays don't support pre-fill efficiently without loop
+            // But we can just push.
+            // Actually, for parallel arrays, we can use direct index assignment if we know the offset.
+          }
 
-      const nodes = payload.nodes || [];
-      const links = payload.links || [];
+          const chunk = data.nodes;
+          const offset = data.index * 50000; // Chunk size is 50k in backend
 
-      updateProgress('rendering', 98);
+          for (let i = 0; i < chunk.length; i++) {
+            const node = chunk[i];
+            const idx = offset + i;
+            if (idx < nodeCount) {
+              n_x[idx] = node.x;
+              n_y[idx] = node.y;
+              n_size[idx] = node.pixel_size || node.size || 1;
+              n_ids[idx] = node.id;
+              n_cards[idx] = node.color;
+              n_labels[idx] = node.label || null;
+            }
+          }
+          nodesReceived += chunk.length;
+
+        } else if (stage === 'links_chunk') {
+          const chunk = data.links;
+          // Just push for now, links are usually strings/ids
+          // Optimization: If sources/targets are indices, use Int32Array. 
+          // But backend sends IDs (strings/ints).
+          for (let i = 0; i < chunk.length; i++) {
+            const link = chunk[i];
+            l_sources.push(link.source);
+            l_targets.push(link.target);
+            l_colors.push(link.color);
+          }
+          linksReceived += chunk.length;
+
+        } else if (stage === 'data_complete') {
+          evtSource.close();
+          renderGraph();
+        }
+      };
+
+      evtSource.onerror = (e) => {
+        console.error("EventSource failed:", e);
+        // Sometimes browser closes connection on reload
+        if (evtSource.readyState === EventSource.CLOSED) return;
+        updateProgress('error', 0);
+        logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">Connection lost</div>`;
+        evtSource.close();
+      };
+    }
+
+    function renderGraph() {
+      updateProgress('rendering', 100);
+
+      // Create a proxy array of indices
+      const nodeIndices = new Uint32Array(nodeCount);
+      for (let i = 0; i < nodeCount; i++) nodeIndices[i] = i;
+
+      // Links need to be an array of objects for Cosmograph? 
+      // Or can we use indices?
+      // Cosmograph allows `links` to be a list of anything, using source/target accessors.
+      // So we can make a proxy array of link indices too.
+      const linkIndices = new Uint32Array(linksReceived);
+      for (let i = 0; i < linksReceived; i++) linkIndices[i] = i;
+
       requestAnimationFrame(() => {
         const graph = new Cosmograph(el, {
           disableSimulation: true,
-          idField: 'id', sourceField: 'source', targetField: 'target',
-          backgroundColor: '#0b0f14',
-          nodeSize: n => n.pixel_size || 2,
-          nodeColor: n => n.color || '#5ac8fa',
-          nodeLabelAccessor: n => n.label,
+          // We pass indices as the data items
+
+          // Identity
+          idField: i => n_ids[i],
+
+          // Position
+          pointX: i => n_x[i],
+          pointY: i => n_y[i],
+
+          // Styling
+          // Using accessors directly
+          nodeSize: i => n_size[i],
+          nodeColor: i => n_cards[i] || '#5ac8fa',
+          nodeLabelAccessor: i => n_labels[i],
+
           hoveredNodeLabelColor: '#fff',
-          linkColor: '#3a3f44', linkOpacity: 0.35,
+
+          // Links
+          linkSource: i => l_sources[i],
+          linkTarget: i => l_targets[i],
+          linkColor: i => l_colors[i] || '#3a3f44',
+          linkOpacity: 0.35,
+
+          backgroundColor: '#0b0f14',
         });
+
         graph.fitView();
-        graph.setData(nodes, links);
-        updateProgress('complete', 100);
+        // Pass the indices arrays
+        graph.setData(nodeIndices, linkIndices);
+
         setTimeout(() => {
-          logEl.innerHTML = `<div>Rendered: ${nodes.length.toLocaleString()} nodes, ${links.length.toLocaleString()} links</div>`;
+          logEl.innerHTML = `<div>Rendered: ${nodeCount.toLocaleString()} nodes, ${linksReceived.toLocaleString()} links</div>`;
         }, 400);
       });
     }
-    
+
     main().catch(e => {
       console.error(e);
       updateProgress('error', 0);

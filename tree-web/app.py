@@ -81,13 +81,11 @@ async def api_graph_stream():
         def compute():
             try:
                 nodes, links = build_graph(progress_callback=callback)
-                # accept DataFrames as well
-                if isinstance(nodes, pd.DataFrame): nodes = nodes.to_dict("records")
-                if isinstance(links, pd.DataFrame): links = links.to_dict("records")
+                # accept DataFrames as well (handled in streaming loop)
 
-                # Normalize the data
-                result_storage["nodes"] = _norm_nodes(nodes)
-                result_storage["links"] = _norm_links(links)
+                # Store raw result
+                result_storage["nodes"] = nodes
+                result_storage["links"] = links
                 result_storage["ready"] = True
 
                 # Send completion message (without data to avoid huge payload)
@@ -141,39 +139,56 @@ async def api_graph_stream():
                             break
 
                         # Stream chunks to keep payload sizes manageable for cosmograph
-                        nodes = result_storage["nodes"] or []
-                        links = result_storage["links"] or []
+                        nodes = result_storage["nodes"]
+                        links = result_storage["links"]
+                        
+                        # Handle DataFrame or list
                         node_total = len(nodes)
                         link_total = len(links)
                         chunk_size = 50_000
 
                         # Send node chunks
-                        sent_nodes = 0
-                        for idx, node_chunk in enumerate(chunk(nodes, chunk_size)):
-                            sent_nodes += len(node_chunk)
-                            progress = 95.0 + 2.0 * (sent_nodes / max(1, node_total))
+                        for i in range(0, node_total, chunk_size):
+                            # Slice
+                            if isinstance(nodes, pd.DataFrame):
+                                chunk_raw = nodes.iloc[i : i + chunk_size].to_dict("records")
+                            else:
+                                chunk_raw = nodes[i : i + chunk_size]
+                            
+                            node_chunk = _norm_nodes(chunk_raw)
+                            
+                            progress = 95.0 + 2.0 * ((i + len(node_chunk)) / max(1, node_total))
                             data_message = {
                                 "stage": "nodes_chunk",
-                                "index": idx,
+                                "index": i // chunk_size,
                                 "total": node_total,
                                 "progress": min(progress, 99.0),
                                 "nodes": node_chunk,
                             }
                             yield f"data: {json.dumps(data_message)}\n\n"
+                            # Small sleep to yield control
+                            await asyncio.sleep(0.01)
 
                         # Send link chunks
-                        sent_links = 0
-                        for idx, link_chunk in enumerate(chunk(links, chunk_size)):
-                            sent_links += len(link_chunk)
-                            progress = 97.0 + 2.0 * (sent_links / max(1, link_total))
+                        for i in range(0, link_total, chunk_size):
+                            # Slice
+                            if isinstance(links, pd.DataFrame):
+                                chunk_raw = links.iloc[i : i + chunk_size].to_dict("records")
+                            else:
+                                chunk_raw = links[i : i + chunk_size]
+                                
+                            link_chunk = _norm_links(chunk_raw)
+                            
+                            progress = 97.0 + 2.0 * ((i + len(link_chunk)) / max(1, link_total))
                             data_message = {
                                 "stage": "links_chunk",
-                                "index": idx,
+                                "index": i // chunk_size,
                                 "total": link_total,
                                 "progress": min(progress, 99.9),
                                 "links": link_chunk,
                             }
                             yield f"data: {json.dumps(data_message)}\n\n"
+                            await asyncio.sleep(0.01)
 
                         # Signal completion
                         yield f"data: {json.dumps({'stage': 'data_complete', 'progress': 100.0})}\n\n"
