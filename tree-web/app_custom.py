@@ -9,11 +9,19 @@ import asyncio
 import queue
 import threading
 from tree_algo import build_graph
+import uuid
+import time
+import gzip
+import io
 
 app = FastAPI()
 
 # serve static files (index.html lives here)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# --- NEW: Serve Custom Renderer ---
+# This serves files from tree-web/custom_renderer at /custom/
+app.mount("/custom", StaticFiles(directory="custom_renderer"), name="custom")
 
 @app.get("/", include_in_schema=False)
 def home():
@@ -188,11 +196,6 @@ async def api_graph_stream():
 
 # --- Async Job Pattern (V2) ---
 
-import uuid
-import time
-import gzip
-import io
-
 class Job:
     def __init__(self):
         self.id = str(uuid.uuid4())
@@ -218,11 +221,28 @@ def _cleanup_old_jobs():
     for jid in to_del:
         JOBS.pop(jid, None)
 
+import os
+
+CACHE_FILE = "graph_cache.json.gz"
+
 @app.post("/api/v2/graph/start")
-def start_graph_job():
+def start_graph_job(use_cache: bool = False):
     _cleanup_old_jobs()
     job = Job()
     JOBS[job.id] = job
+
+    # Cache Hit Logic
+    if use_cache and os.path.exists(CACHE_FILE):
+        print(f"Cache Hit: Loading from {CACHE_FILE}")
+        try:
+            with open(CACHE_FILE, "rb") as f:
+                job.result = f.read()
+            job.post_progress("complete", 100.0)
+            job.done.set()
+            return {"job_id": job.id}
+        except Exception as e:
+            print(f"Cache Read Error: {e}")
+            # Fallback to compute if read fails
 
     def compute():
         try:
@@ -230,14 +250,31 @@ def start_graph_job():
                 job.post_progress(stage, progress)
 
             # 1. Build Graph (returns DataFrames)
-            nodes, links = build_graph(progress_callback=callback)
+            nodes_df, links_df = build_graph(progress_callback=callback)
             
-            # 2. Stream to Gzip Buffer with SAFE serialization
-            job.post_progress("compressing", 95.0)
+            # --- ZERO-OVERHEAD OPTIMIZATION: Remap IDs to Integers ---
+            job.post_progress("layout", 99.0)
+            
+            # Create mapping: StringID -> IntID
+            if "id" not in nodes_df.columns:
+                nodes_df["id"] = nodes_df.index
+            
+            # Create dictionary mapping string IDs to 0..N
+            id_map = {str(nid): i for i, nid in enumerate(nodes_df["id"])}
+            
+            # Remap Links (Source/Target -> Int)
+            links_df["source"] = links_df["source"].astype(str).map(id_map).fillna(-1).astype(int)
+            links_df["target"] = links_df["target"].astype(str).map(id_map).fillna(-1).astype(int)
+            
+            # Update Nodes ID to 0..N
+            # We preserve 'label', 'color', 'size', 'x', 'y'
+            nodes_df["id"] = range(len(nodes_df))
+            
+            # 2. Stream to Gzip Buffer
+            job.post_progress("compressing", 0.0)
             
             buf = io.BytesIO()
             with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
-                # Helper to write string as utf-8 bytes
                 def write(s):
                     gz.write(s.encode("utf-8"))
 
@@ -245,45 +282,54 @@ def start_graph_job():
                 
                 # Stream nodes
                 chunk_size = 50000
-                total_nodes = len(nodes)
+                total_nodes = len(nodes_df)
+                
                 for i in range(0, total_nodes, chunk_size):
-                    chunk_df = nodes.iloc[i:i+chunk_size]
-                    # Convert to dict records -> norm -> json
-                    chunk_records = chunk_df.to_dict("records")
-                    norm_records = _norm_nodes(chunk_records)
+                    # Convert to list of dicts directly
+                    # keys: id (int), x, y, size, color, label 
+                    chunk = nodes_df.iloc[i:i+chunk_size].to_dict("records")
                     
-                    # Dump to JSON string and strip outer []
-                    json_str = json.dumps(norm_records)
+                    json_str = json.dumps(chunk)
                     inner = json_str[1:-1]
                     
                     if i > 0 and len(inner) > 0:
                         write(",")
                     write(inner)
                     
-                    # Report progress occasionally during compression
                     if i % 250000 == 0:
-                        job.post_progress("compressing", 95.0 + 4.9 * (i / total_nodes))
-                        time.sleep(0) # yield GIL
+                        job.post_progress("compressing", 50.0 * (i / total_nodes))
+                        time.sleep(0) 
 
                 write('],"links":[')
                 
                 # Stream links
-                total_links = len(links)
+                total_links = len(links_df)
                 for i in range(0, total_links, chunk_size):
-                    chunk_df = links.iloc[i:i+chunk_size]
-                    chunk_records = chunk_df.to_dict("records")
-                    norm_records = _norm_links(chunk_records)
+                    chunk = links_df.iloc[i:i+chunk_size].to_dict("records")
                     
-                    json_str = json.dumps(norm_records)
+                    json_str = json.dumps(chunk)
                     inner = json_str[1:-1]
                     
                     if i > 0 and len(inner) > 0:
                         write(",")
                     write(inner)
+                    
+                    if i % 250000 == 0:
+                         job.post_progress("compressing", 50.0 + 50.0 * (i / total_links))
+                         time.sleep(0)
 
                 write(']}')
 
             job.result = buf.getvalue()
+            
+            # SAVE TO CACHE
+            try:
+                with open(CACHE_FILE, "wb") as f:
+                     f.write(job.result)
+                print(f"Cache Saved to {CACHE_FILE} ({len(job.result)} bytes)")
+            except Exception as e:
+                print(f"Cache Write Error: {e}")
+
             job.post_progress("complete", 100.0)
             
         except Exception as e:

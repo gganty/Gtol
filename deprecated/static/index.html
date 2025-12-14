@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <title>Tree Viewer (Cosmograph)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: #0b0f14;
+    }
+
+    #mount {
+      position: fixed;
+      inset: 0;
+    }
+
+    #log {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      background: rgba(0, 0, 0, .6);
+      color: #fff;
+      padding: 8px 12px;
+      font: 12px/1.2 system-ui;
+      border-radius: 8px;
+      min-width: 200px;
+      overflow: hidden;
+    }
+
+    #progress-bar {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, .2);
+      border-radius: 2px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+
+    #progress-fill {
+      height: 100%;
+      background: #5ac8fa;
+      transition: width 0.3s ease;
+      width: 0%;
+    }
+
+    .stage-name {
+      text-transform: capitalize;
+      font-weight: 500;
+    }
+
+    .progress-percent {
+      color: #5ac8fa;
+      margin-left: 8px;
+    }
+  </style>
+  <!-- Cosmograph CDN -->
+
+</head>
+
+<body>
+  <div id="mount"></div>
+  <div id="log">loading…</div>
+
+  <script type="module">
+    import { Cosmograph } from "https://esm.sh/@cosmograph/cosmograph@1.3.1?bundle"; // TO-DO: replace with local import or create a self-written browser WebGL renderer (II: done 50%)
+
+    const el = document.getElementById('mount');
+    const logEl = document.getElementById('log');
+
+    function updateProgress(stage, progress) {
+      const stageNames = {
+        'reading': 'Reading file',
+        'parsing': 'Parsing tree',
+        'layout': 'Computing layout',
+        'rendering': 'Preparing data',
+        'compressing': 'Compressing result',
+        'downloading': 'Downloading graph',
+        'complete': 'Complete',
+        'error': 'Error'
+      };
+      const stageName = stageNames[stage] || stage;
+      const percent = Math.round(progress);
+      logEl.innerHTML = `
+        <div>
+          <span class="stage-name">${stageName}</span>
+          <span class="progress-percent">${percent}%</span>
+        </div>
+        <div id="progress-bar">
+          <div id="progress-fill" style="width: ${percent}%"></div>
+        </div>
+      `;
+    }
+
+    async function main() {
+      updateProgress('starting', 0);
+
+      try {
+        // 1. Start Job
+        const startResp = await fetch('/api/v2/graph/start', { method: 'POST' });
+        if (!startResp.ok) throw new Error(`Start job failed: ${startResp.status}`);
+        const { job_id } = await startResp.json();
+        console.log("Job started:", job_id);
+
+        // 2. Monitor Progress via SSE
+        await monitorProgress(job_id);
+
+        // 3. Download Result
+        updateProgress('downloading', 98);
+        const resResp = await fetch(`/api/v2/graph/${job_id}/result`);
+        if (!resResp.ok) throw new Error(`Result fetch failed: ${resResp.status}`);
+
+        // 4. Stream Parse into TypedArrays
+        updateProgress('parsing', 99);
+
+        const blob = await resResp.blob();
+        const ds = new DecompressionStream('gzip');
+        const stream = blob.stream().pipeThrough(ds);
+
+        const data = await parseGraphStream(stream);
+
+        renderGraph(data);
+
+      } catch (err) {
+        console.error(err);
+        updateProgress('error', 0);
+        logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">${err.message}</div>`;
+      }
+    }
+
+    async function parseGraphStream(stream) {
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+
+      // Dynamic arrays, resizing as needed
+      let capacityNodes = 1000000;
+      let capacityLinks = 1000000;
+      let nodeCount = 0;
+      let linkCount = 0;
+
+      // Geometry Columns
+      let xArr = new Float32Array(capacityNodes);
+      let yArr = new Float32Array(capacityNodes);
+      let sizeArr = new Float32Array(capacityNodes);
+
+      // Data Columns (High Memory Risk, but Labels Required)
+      let colors = new Array(capacityNodes);
+      let labels = new Array(capacityNodes);
+
+      // Links (Source/Target indices)
+      let linkSrc = new Uint32Array(capacityLinks);
+      let linkTgt = new Uint32Array(capacityLinks);
+
+      let buffer = '';
+      let state = 'SEARCH_NODES';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          if (state === 'SEARCH_NODES') {
+            const idx = buffer.indexOf('"nodes":[');
+            if (idx !== -1) {
+              buffer = buffer.slice(idx + 9);
+              state = 'IN_NODES';
+            } else {
+              if (buffer.length > 20) buffer = buffer.slice(-20);
+              break;
+            }
+          }
+
+          if (state === 'IN_NODES' || state === 'IN_LINKS') {
+            buffer = buffer.trimStart();
+            if (buffer.startsWith(',')) {
+              buffer = buffer.slice(1).trimStart();
+            }
+
+            if (buffer.startsWith(']')) {
+              buffer = buffer.slice(1);
+              state = (state === 'IN_NODES') ? 'SEARCH_LINKS' : 'DONE';
+              if (state === 'DONE') {
+                // Trim arrays to exact size
+                return {
+                  nodeCount, linkCount,
+                  x: xArr.slice(0, nodeCount),
+                  y: yArr.slice(0, nodeCount),
+                  size: sizeArr.slice(0, nodeCount),
+                  colors: colors.slice(0, nodeCount),
+                  labels: labels.slice(0, nodeCount),
+                  linkSrc: linkSrc.slice(0, linkCount),
+                  linkTgt: linkTgt.slice(0, linkCount)
+                };
+              }
+              continue;
+            }
+
+            if (buffer.startsWith('{')) {
+              // Find matching }
+              let endIdx = -1;
+              let inString = false;
+              let bracketCount = 0;
+
+              for (let i = 0; i < buffer.length; i++) {
+                const c = buffer[i];
+                if (c === '"' && buffer[i - 1] !== '\\') { inString = !inString; continue; }
+                if (inString) continue;
+                if (c === '{') bracketCount++;
+                else if (c === '}') {
+                  bracketCount--;
+                  if (bracketCount === 0) { endIdx = i; break; }
+                }
+              }
+
+              if (endIdx !== -1) {
+                const objStr = buffer.slice(0, endIdx + 1);
+                buffer = buffer.slice(endIdx + 1);
+
+                try {
+                  const obj = JSON.parse(objStr);
+
+                  if (state === 'IN_NODES') {
+                    // Resize if full
+                    if (nodeCount >= capacityNodes) {
+                      capacityNodes *= 2;
+                      const newX = new Float32Array(capacityNodes); newX.set(xArr); xArr = newX;
+                      const newY = new Float32Array(capacityNodes); newY.set(yArr); yArr = newY;
+                      const newS = new Float32Array(capacityNodes); newS.set(sizeArr); sizeArr = newS;
+
+                      // For JS Arrays, manual copy
+                      const newColors = new Array(capacityNodes);
+                      for (let k = 0; k < colors.length; k++) newColors[k] = colors[k];
+                      colors = newColors;
+
+                      const newLabels = new Array(capacityNodes);
+                      for (let k = 0; k < labels.length; k++) newLabels[k] = labels[k];
+                      labels = newLabels;
+                    }
+
+                    xArr[nodeCount] = obj.x;
+                    yArr[nodeCount] = obj.y;
+                    sizeArr[nodeCount] = obj.size || 2;
+                    colors[nodeCount] = obj.color;
+                    labels[nodeCount] = obj.label;
+                    nodeCount++;
+
+                  } else {
+                    // Links
+                    if (linkCount >= capacityLinks) {
+                      capacityLinks *= 2;
+                      const newSrc = new Uint32Array(capacityLinks); newSrc.set(linkSrc); linkSrc = newSrc;
+                      const newTgt = new Uint32Array(capacityLinks); newTgt.set(linkTgt); linkTgt = newTgt;
+                    }
+                    linkSrc[linkCount] = obj.source;
+                    linkTgt[linkCount] = obj.target;
+                    linkCount++;
+                  }
+
+                  if (nodeCount % 100000 === 0 || linkCount % 100000 === 0) {
+                    const total = state === 'IN_NODES' ? nodeCount : linkCount;
+                    const label = state === 'IN_NODES' ? 'Nodes' : 'Links';
+                    logEl.innerText = `Parsing ${label}: ${total.toLocaleString()}`;
+                    if (total % 500000 === 0) await new Promise(r => setTimeout(r, 0));
+                  }
+
+                } catch (e) { }
+                continue;
+              } else {
+                break;
+              }
+            } else {
+              if (buffer.length === 0) break;
+              break;
+            }
+          }
+          if (state === 'SEARCH_LINKS') {
+            const idx = buffer.indexOf('"links":[');
+            if (idx !== -1) {
+              buffer = buffer.slice(idx + 9);
+              state = 'IN_LINKS';
+            } else {
+              if (buffer.length > 20) buffer = buffer.slice(-20);
+              break;
+            }
+          }
+        }
+      }
+      return {
+        nodeCount, linkCount,
+        x: xArr.slice(0, nodeCount),
+        y: yArr.slice(0, nodeCount),
+        size: sizeArr.slice(0, nodeCount),
+        colors: colors.slice(0, nodeCount),
+        labels: labels.slice(0, nodeCount),
+        linkSrc: linkSrc.slice(0, linkCount),
+        linkTgt: linkTgt.slice(0, linkCount)
+      };
+    }
+
+    function monitorProgress(job_id) {
+      return new Promise((resolve, reject) => {
+        const evtSource = new EventSource(`/api/v2/graph/${job_id}/progress`);
+
+        evtSource.onmessage = (e) => {
+          const data = JSON.parse(e.data);
+          if (data.progress !== undefined) {
+            updateProgress(data.stage, data.progress);
+          }
+          if (data.stage === 'error') {
+            evtSource.close();
+            reject(new Error(data.error || "Unknown job error"));
+          } else if (data.stage === 'complete') {
+            evtSource.close();
+            resolve();
+          }
+        };
+
+        evtSource.onerror = () => {
+          evtSource.close();
+          reject(new Error("Progress stream disconnected"));
+        };
+      });
+    }
+
+    function renderGraph(data) {
+      updateProgress('rendering', 100);
+
+      // Create lightweight placeholders to drive the layout loop
+      // Int8Array is fine, we only need the valid length and the index 'i' in accessors
+      const nodesPlaceholder = new Int8Array(data.nodeCount);
+      const linksPlaceholder = new Int8Array(data.linkCount);
+
+      const graph = new Cosmograph(el, {
+        disableSimulation: true,
+        backgroundColor: '#0b0f14',
+
+        // Use Index 'i' to access TypedArrays
+        // d is the value from placeholder (irrelevant), i is the index (0..N)
+        nodeX: (_, i) => data.x[i],
+        nodeY: (_, i) => data.y[i],
+        nodeSize: (_, i) => data.size[i],
+        nodeColor: (_, i) => data.colors[i] || '#5ac8fa',
+        nodeLabel: (_, i) => data.labels[i] || '',
+
+        // Link Accessors (Source/Target are Node Indices)
+        linkSource: (_, i) => data.linkSrc[i],
+        linkTarget: (_, i) => data.linkTgt[i],
+        linkColor: '#3a3f44',
+        linkOpacity: 0.35,
+
+        hoveredNodeLabelColor: '#fff',
+      });
+
+      // Pass the placeholders. 
+      // Cosmograph will iterate 0..length and call accessors with index.
+      graph.setData(nodesPlaceholder, linksPlaceholder);
+
+      graph.fitView();
+      logEl.innerHTML = `<div>Rendered: ${data.nodeCount.toLocaleString()} nodes, ${data.linkCount.toLocaleString()} links</div>`;
+    }
+
+    main().catch(e => {
+      console.error(e);
+      updateProgress('error', 0);
+      logEl.innerHTML += `<div style="color: #ff6b6b; margin-top: 4px;">${e.message}</div>`;
+    });
+  </script>
+</body>
+
+</html>

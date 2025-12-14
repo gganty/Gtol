@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Tree Viewer (Custom WebGL)</title>
+    <style>
+        body {
+            margin: 0;
+            background: #050505;
+            color: #fff;
+            font-family: 'Inter', system-ui, sans-serif;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #ui {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 280px;
+            background: rgba(20, 20, 20, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        h3 {
+            margin: 0 0 15px 0;
+            font-weight: 600;
+            font-size: 18px;
+            letter-spacing: -0.5px;
+        }
+
+        hr {
+            border: 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            margin: 15px 0;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+            margin-bottom: 8px;
+            font-weight: 600;
+            display: block;
+        }
+
+        .desc {
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 13px;
+            color: white;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        #btn-compute {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+        }
+
+        #btn-compute:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.4);
+        }
+
+        #btn-compute:disabled {
+            opacity: 0.7;
+            transform: none;
+            cursor: wait;
+        }
+
+        #btn-load-file {
+            background: linear-gradient(135deg, #10b981, #059669);
+        }
+
+        #btn-load-file:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(5, 150, 105, 0.4);
+        }
+
+        input[type="file"] {
+            width: 100%;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        input[type="file"]::file-selector-button {
+            background: #333;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            color: #fff;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+
+        #status {
+            font-size: 13px;
+            color: #ddd;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #status::before {
+            content: '';
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            background: #10b981;
+            border-radius: 50%;
+        }
+
+        #progress-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 20px;
+        }
+
+        #progress-bar {
+            height: 100%;
+            background: #3b82f6;
+            width: 0%;
+            transition: width 0.3s ease-out;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <h3>Tree Viewer</h3>
+        <div id="status">Ready</div>
+
+        <div class="section">
+            <span class="label">Option 1: Server Compute</span>
+            <button id="btn-compute">Compute & Download Cache</button>
+            <div class="desc">Generate valid .json.gz on server</div>
+        </div>
+
+        <div class="section">
+            <span class="label">Option 2: Local Visualization</span>
+            <input type="file" id="file-input" accept=".gz,.json">
+            <button id="btn-load-file">Render Selected File</button>
+        </div>
+
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+        <div class="desc" style="text-align:center; margin-top:15px; opacity:0.5;">Pan: Drag &middot; Zoom: Scroll</div>
+    </div>
+    <!-- Layer 1: WebGL (Graph) -->
+    <canvas id="glcanvas"></canvas>
+    <!-- Layer 2: 2D Text (Labels) -->
+    <canvas id="text-canvas" style="position: absolute; top:0; left:0; pointer-events:none;"></canvas>
+
+    <script type="module">
+        import { GraphRenderer } from './engine.js';
+        import { loadGraphStream } from './loader.js';
+
+        const canvas = document.getElementById('glcanvas');
+        const textCanvas = document.getElementById('text-canvas');
+        const statusEl = document.getElementById('status');
+        const progressEl = document.getElementById('progress-bar');
+
+        const btnCompute = document.getElementById('btn-compute');
+        const btnLoadFile = document.getElementById('btn-load-file');
+        const fileInput = document.getElementById('file-input');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            textCanvas.width = window.innerWidth;
+            textCanvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        let renderer;
+        try {
+            renderer = new GraphRenderer(canvas);
+            renderer.setTextCanvas(textCanvas);
+        } catch (e) {
+            statusEl.innerHTML = `<span style="color:#ef4444">Error: ${e.message}</span>`;
+            throw e;
+        }
+
+        let transform = { x: 0, y: 0, k: 0.00001 };
+        let isDragging = false;
+        let lastX = 0, lastY = 0;
+
+        function updateStatus(msg, isError = false) {
+            statusEl.innerHTML = isError ? `<span style="color:#ef4444">${msg}</span>` : msg;
+        }
+
+        // --- OPTION 1: COMPUTE ---
+        btnCompute.addEventListener('click', async () => {
+            try {
+                updateStatus("Requesting Job...");
+                progressEl.style.width = '0%';
+                btnCompute.disabled = true;
+
+                const startRes = await fetch('/api/v2/graph/start?use_cache=false', { method: 'POST' });
+                const { job_id } = await startRes.json();
+
+                updateStatus("Computing...");
+
+                const evtSource = new EventSource(`/api/v2/graph/${job_id}/progress`);
+
+                evtSource.onmessage = async (e) => {
+                    const msg = JSON.parse(e.data);
+                    if (msg.stage === 'complete') {
+                        evtSource.close();
+                        updateStatus("Downloading File...");
+
+                        const downloadUrl = `/api/v2/graph/${job_id}/result`;
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = downloadUrl;
+                        a.download = 'graph.json.gz';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+
+                        updateStatus("Downloaded. Use Option 2.");
+                        btnCompute.disabled = false;
+                        progressEl.style.width = '100%';
+
+                    } else if (msg.stage === 'error') {
+                        updateStatus(msg.error, true);
+                        evtSource.close();
+                        btnCompute.disabled = false;
+                    } else {
+                        updateStatus(`${msg.stage} ${Math.round(msg.progress)}%`);
+                        progressEl.style.width = `${msg.progress}%`;
+                    }
+                };
+            } catch (e) {
+                updateStatus(e.message, true);
+                btnCompute.disabled = false;
+            }
+        });
+
+        // --- OPTION 2: LOAD LOCAL FILE ---
+        btnLoadFile.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) {
+                alert("Please select a file first.");
+                return;
+            }
+
+            updateStatus("Reading File...");
+            progressEl.style.width = '0%';
+            btnLoadFile.disabled = true;
+
+            try {
+                await processStream(file.stream());
+            } catch (e) {
+                updateStatus(e.message, true);
+            } finally {
+                btnLoadFile.disabled = false;
+            }
+        });
+
+        // --- SHARED PROCESSOR ---
+        async function processStream(stream) {
+            updateStatus("Parsing Stream...");
+
+            const data = await loadGraphStream(stream, (msg) => {
+                // Throttle progress updates?
+                if (Math.random() > 0.9) statusEl.textContent = msg;
+            });
+
+            updateStatus(`Rendering ${data.nodeCount.toLocaleString()} nodes`);
+            progressEl.style.width = '100%';
+
+            // Auto-Fit
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (let i = 0; i < data.nodeCount; i += 100) {
+                const x = data.x[i];
+                const y = data.y[i];
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+            if (minX === Infinity) { minX = -1; maxX = 1; minY = -1; maxY = 1; }
+
+            const cx = (minX + maxX) / 2;
+            const cy = (minY + maxY) / 2;
+            const w = maxX - minX;
+            const h = maxY - minY;
+            const scale = Math.min(canvas.width / w, canvas.height / h) * 0.8;
+
+            transform.k = scale;
+            transform.x = (canvas.width / 2) / scale - cx;
+            transform.y = (canvas.height / 2) / scale - cy;
+
+            renderer.setData(data);
+            renderer.setTransform(transform.x, transform.y, transform.k);
+        }
+
+        // Debounce High Quality Render
+        let interactionTimer;
+        function triggerHighQuality() {
+            clearTimeout(interactionTimer);
+            interactionTimer = setTimeout(() => {
+                renderer.render(1);
+            }, 300);
+        }
+
+        // Interactions
+        canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+            triggerHighQuality();
+        });
+
+        canvas.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX;
+            lastY = e.clientY;
+
+            transform.x += dx / transform.k;
+            transform.y -= dy / transform.k;
+
+            renderer.setTransform(transform.x, transform.y, transform.k, true);
+            triggerHighQuality();
+        });
+
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const zoomFactor = 1.03; // Smoother zoom (was 1.1)
+            const direction = e.deltaY > 0 ? 1 / zoomFactor : zoomFactor;
+
+            const my_gl = canvas.height - e.clientY;
+            const wx = (e.clientX) / transform.k - transform.x;
+            const wy = my_gl / transform.k - transform.y;
+
+            transform.k *= direction;
+            transform.x = (e.clientX) / transform.k - wx;
+            transform.y = my_gl / transform.k - wy;
+
+            renderer.setTransform(transform.x, transform.y, transform.k, true);
+            triggerHighQuality();
+        });
+    </script>
+</body>
+
+</html>
