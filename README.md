@@ -18,12 +18,7 @@ A high-performance visualization engine designed to render massive phylogenetic 
 The data flow is designed to minimize RAM usage at every step, moving from raw text to GPU VRAM without keeping full object trees in memory.
 
 ```mermaid
-graph LR
-    A["Newick File"] --> B("Python Backend")
-    B --> C["Gzip Stream"]
-    C --> D("JS Loader")
-    D --> E["TypedArrays"]
-    E --> F("WebGL Engine")
+[Newick File] -> (Python Backend) -> [Gzip Stream] -> (JS Loader) -> [TypedArrays] -> (WebGL Engine)
 
 ```
 
