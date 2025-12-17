@@ -5,7 +5,7 @@
     <meta charset="utf-8" />
     <title>Tree Viewer (WebGL)</title>
     <style>
-        /* Темная тема для "Pro" софта */
+        /* Dark theme for "Pro" look :) */
         body {
             margin: 0;
             background: #050505;
@@ -14,7 +14,7 @@
             overflow: hidden;
         }
 
-        /* Слои канвасов на весь экран */
+        /* Fullscreen canvas layers */
         canvas {
             display: block;
             width: 100vw;
@@ -24,18 +24,18 @@
             left: 0;
         }
 
-        /* WebGL слой внизу (z-index по умолчанию 0) */
+        /* WebGL layer at bottom (z-index 0 default) */
         #glcanvas {
             z-index: 1;
         }
 
-        /* Текстовый слой поверх (pointer-events: none, чтобы клики проходили сквозь него) */
+        /* Text layer on top (pointer-events: none, to let clicks pass through) */
         #text-canvas {
             z-index: 2;
             pointer-events: none;
         }
 
-        /* Плавающая панель управления */
+        /* Floating control panel */
         #ui {
             position: fixed;
             top: 20px;
@@ -70,14 +70,14 @@
             background: #3b82f6;
         }
 
-        /* Синий */
+        /* Blue */
         #btn-load-file {
             background: #10b981;
         }
 
-        /* Зеленый */
+        /* Green */
 
-        /* Полоса загрузки */
+        /* Loading strip */
         #progress-container {
             width: 100%;
             height: 6px;
@@ -141,7 +141,7 @@
         import { GraphRenderer } from '/custom/engine.js';
         import { loadGraphStream } from '/custom/loader.js';
 
-        // Инициализация Canvas
+        // Canvas Initialization
         const canvas = document.getElementById('glcanvas');
         const textCanvas = document.getElementById('text-canvas');
 
@@ -154,7 +154,7 @@
         window.addEventListener('resize', resize);
         resize();
 
-        // Инициализация движка
+        // Engine Initialization
         let renderer;
         try {
             renderer = new GraphRenderer(canvas);
@@ -171,11 +171,11 @@
             statusEl.innerText = "Starting job...";
             progressEl.style.width = '0%';
 
-            // 1. Запускаем задачу
+            // 1. Start Job
             const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
             const { job_id } = await res.json();
 
-            // 2. Подписываемся на прогресс (SSE)
+            // 2. Subscribe to progress (SSE)
             const evtSource = new EventSource(`/api/v2/graph/${job_id}/progress`);
 
             evtSource.onmessage = (e) => {
@@ -185,7 +185,7 @@
                     evtSource.close();
                     statusEl.innerText = "Downloading Result...";
 
-                    // 3. Скачиваем результат как файл (БЕЗ РЕНДЕРИНГА)
+                    // 3. Download result as file (NO RENDERING)
                     const link = document.createElement('a');
                     link.href = `/api/v2/graph/${job_id}/result`;
                     link.download = `graph_${job_id}.json.gz`;
@@ -211,24 +211,24 @@
             const fileInput = document.getElementById('file-input');
 
             if (fileInput.files.length > 0) {
-                // ВАРИАНТ А: Рендер локального файла
+                // OPTION A: Local file render
                 statusEl.innerText = "Reading local file...";
                 await processStream(fileInput.files[0].stream());
             } else {
-                // ВАРИАНТ Б: Рендер кэша с сервера (если файл не выбран)
+                // OPTION B: Render server cache (if no file selected)
                 statusEl.innerText = "Fetching server cache...";
 
-                // Триггерим "старт" с кэшем, чтобы получить ID
+                // Trigger "start" with cache to get ID
                 const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
                 const { job_id } = await res.json();
 
-                // Ждем пока работа завершится (вдруг кэша нет и он начал считать?)
-                // Но мы предполагаем, что юзер уже нажал Compute, так что просто качаем.
-                // В идеале можно так же подписаться на SSE, но для простоты запросим result сразу.
-                // Если result не готов, сервер вернет 400.
+                // Wait for job to finish (what if no cache and it started calculating?)
+                // We assume user already clicked Compute, so just download.
+                // Ideally we should subscribe to SSE too, but for simplicity we request result immediately.
+                // If result not ready, server returns 400.
 
-                // Для надежности: просто идем в тот же SSE цикл, но с флагом "render_after"
-                // Или просто фетчим стрим.
+                // Reliability: just enter same SSE loop, but with "render_after" flag
+                // Or just fetch stream.
 
                 statusEl.innerText = "Downloading stream...";
                 const resultRes = await fetch(`/api/v2/graph/${job_id}/result`);
@@ -244,7 +244,7 @@
         async function processStream(stream) {
             statusEl.innerText = "Parsing & Rendering...";
 
-            // Вызываем наш кастомный парсер из loader.js
+            // Call our custom parser from loader.js
             const data = await loadGraphStream(stream, (msg) => {
                 statusEl.innerText = msg;
             });
@@ -252,11 +252,11 @@
             statusEl.innerText = `Rendered ${data.nodeCount.toLocaleString()} nodes`;
             progressEl.style.width = '100%';
 
-            // Auto-Fit (Центрирование камеры)
-            // ... (упрощенный расчет bounds для старта) ...
+            // Auto-Fit (Center Camera)
+            // ... (simplified bounds calculation for start) ...
             renderer.setData(data);
 
-            // Сброс камеры
+            // Reset camera
             renderer.setTransform(-data.x[0] + canvas.width / 2, -data.y[0] + canvas.height / 2, 0.5);
         }
 
@@ -272,7 +272,7 @@
 
         window.addEventListener('mouseup', () => {
             isDragging = false;
-            // Когда отпускаем мышь - рисуем в высоком качестве
+            // When mouse released - render high quality
             renderer.setTransform(transform.x, transform.y, transform.k, false);
         });
 
@@ -284,9 +284,9 @@
 
             // Pan logic
             transform.x += dx / transform.k;
-            transform.y -= dy / transform.k; // Y WebGL часто инвертирован
+            transform.y -= dy / transform.k; // Y WebGL usually inverted
 
-            // isInteracting=true (рисуем быстро, с пропуском точек)
+            // isInteracting=true (fast draw, skipping points)
             renderer.setTransform(transform.x, transform.y, transform.k, true);
         });
 
@@ -299,7 +299,7 @@
             const mx = e.clientX;
             const my = canvas.height - e.clientY; // Invert Y for math
 
-            // Математика зума "в точку курсора"
+            // Zoom to cursor math
             // WorldX = (ScreenX / k) - tx
 
             const wx_before = mx / transform.k - transform.x;
@@ -307,7 +307,7 @@
 
             transform.k *= direction;
 
-            // Мы хотим, чтобы wx_before осталось там же
+            // We want wx_before to stay there
             // wx_before = mx / new_k - new_tx
             // new_tx = mx / new_k - wx_before
 

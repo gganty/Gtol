@@ -11,7 +11,7 @@ export class GraphRenderer {
 
         if (!this.gl) throw new Error("WebGL not supported");
 
-        // --- Инициализация программ и переменных ---
+        // --- Initialization of programs and variables ---
         this.program = this.createProgram(POINT_VS, POINT_FS);
         this.programLine = this.createProgram(LINE_VS, LINE_FS);
 
@@ -32,13 +32,12 @@ export class GraphRenderer {
         this.bufPos = this.gl.createBuffer();
         this.bufSize = this.gl.createBuffer();
         this.bufColor = this.gl.createBuffer();
-        this.bufLinkPos = null; 
+        this.bufLinkPos = null;
 
         this.gl.enable(this.gl.BLEND);
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
-        // Расширение для индексов > 65535 (критично для больших графов)
-        this.ext = this.gl.getExtension('OES_element_index_uint');
+        // Extension for indices > 65535 (critical for large graphs)
 
         this.ctx = null;
         this.transform = { x: 0, y: 0, k: 1.0 };
@@ -76,7 +75,7 @@ export class GraphRenderer {
         this.nodeCount = data.nodeCount;
         this.linkCount = data.linkCount;
 
-        // Сохраняем ссылки для Labels
+        // Save references for Labels
         this.dataX = data.x;
         this.dataY = data.y;
         this.dataLabels = data.labels;
@@ -124,8 +123,8 @@ export class GraphRenderer {
 
         // --- SPATIAL GRID BUILD ---
         console.time("SpatialGrid");
-        
-        // A. Границы
+
+        // A. Bounds
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (let i = 0; i < this.nodeCount; i += 100) {
             const x = data.x[i]; const y = data.y[i];
@@ -134,8 +133,8 @@ export class GraphRenderer {
         }
         minX -= 100; maxX += 100; minY -= 100; maxY += 100;
         this.gridBounds = { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
-        
-        // B. Подсчет
+
+        // B. Counting
         const GRID_RES = 64;
         this.gridRes = GRID_RES;
         this.gridCounts = new Uint32Array(GRID_RES * GRID_RES);
@@ -153,14 +152,14 @@ export class GraphRenderer {
             this.gridCounts[getBucket(data.x[i], data.y[i])]++;
         }
 
-        // C. Смещения
+        // C. Offsets
         let accum = 0;
         for (let i = 0; i < this.gridCounts.length; i++) {
             this.gridOffsets[i] = accum;
             accum += this.gridCounts[i];
         }
 
-        // D. Индексный буфер
+        // D. Index Buffer
         const currOffsets = new Uint32Array(this.gridOffsets);
         const spatialIndices = new Uint32Array(this.nodeCount);
 
@@ -193,35 +192,35 @@ export class GraphRenderer {
         gl.clear(gl.COLOR_BUFFER_BIT);
 
         const { x: tx, y: ty, k } = this.transform;
-        
-        // --- CULLING LOGIC (Восстановленная часть) ---
-        // Рассчитываем, какие ячейки сетки видны
+
+        // --- CULLING LOGIC (Restored) ---
+        // Calculate which grid cells are visible
         let visibleBuckets = [];
         let visiblePoints = 0;
         let useGrid = false;
 
-        // Используем сетку только если данные готовы и зум достаточно большой 
-        // (если зум маленький и видно всё дерево, проще нарисовать всё массивом)
+        // Use grid only if data is ready and zoom is deep enough
+        // (if zoom is shallow and whole tree is visible, easier to draw everything as array)
         if (this.gridBounds && this.ext && stride === 1) {
             useGrid = true;
-            const screenMinX = -w; const screenMaxX = 2 * w; // Берем с запасом
+            const screenMinX = -w; const screenMaxX = 2 * w; // Add margin
             const screenMinY = -h; const screenMaxY = 2 * h;
-            
-            // Обратная проекция: Screen -> World
+
+            // Inverse projection: Screen -> World
             const worldMinX = screenMinX / k - tx;
             const worldMaxX = screenMaxX / k - tx;
-            const worldMinY = (h - screenMaxY) / k - ty; // Y инвертирован
+            const worldMinY = (h - screenMaxY) / k - ty; // Y inverted
             const worldMaxY = (h - screenMinY) / k - ty;
 
-            // Находим диапазоны индексов сетки
+            // Find grid index ranges
             const gx1 = Math.floor(((worldMinX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
             const gx2 = Math.floor(((worldMaxX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
             const gy1 = Math.floor(((Math.min(worldMinY, worldMaxY) - this.gridBounds.minY) / this.gridBounds.height) * this.gridRes);
             const gy2 = Math.floor(((Math.max(worldMinY, worldMaxY) - this.gridBounds.minY) / this.gridBounds.height) * this.gridRes);
 
-            const bxStart = Math.max(0, gx1); 
+            const bxStart = Math.max(0, gx1);
             const bxEnd = Math.min(this.gridRes - 1, gx2);
-            const byStart = Math.max(0, gy1); 
+            const byStart = Math.max(0, gy1);
             const byEnd = Math.min(this.gridRes - 1, gy2);
 
             for (let by = byStart; by <= byEnd; by++) {
@@ -235,8 +234,8 @@ export class GraphRenderer {
                 }
             }
         }
-        
-        // Если точек слишком мало (мы очень глубоко), отключаем прореживание совсем
+
+        // If too few points (we are very deep), disable stride completely
         let effectiveStride = stride;
         if (stride > 1 && visiblePoints < 500000) effectiveStride = 1;
 
@@ -270,26 +269,26 @@ export class GraphRenderer {
         gl.enableVertexAttribArray(this.locColor);
 
         if (useGrid) {
-            // GRID DRAW (Culling активен)
+            // GRID DRAW (Culling active)
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
             for (const bucket of visibleBuckets) {
-                // Рисуем только точки из текущей видимой ячейки
-                // offset * 4, потому что индексы UINT32 занимают 4 байта
+                // Draw only points from current visible cell
+                // offset * 4 because UINT32 indices take 4 bytes
                 gl.drawElements(gl.POINTS, bucket.count, gl.UNSIGNED_INT, bucket.offset * 4);
             }
         } else {
-            // STRIDE DRAW (Быстрое рисование или всё дерево сразу)
-            // Здесь нужен хак со stride в vertexAttribPointer
+            // STRIDE DRAW (Fast draw or whole tree)
+            // Requires stride hack in vertexAttribPointer
             const bStride = effectiveStride;
             const F = 4; // float bytes
-            
-            // Перепривязываем атрибуты с шагом (Stride)
+
+            // Rebind attributes with Stride
             gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
             gl.vertexAttribPointer(this.locPos, 2, gl.FLOAT, false, bStride * 2 * F, 0);
-            
+
             gl.bindBuffer(gl.ARRAY_BUFFER, this.bufSize);
             gl.vertexAttribPointer(this.locSize, 1, gl.FLOAT, false, bStride * 1 * F, 0);
-            
+
             gl.bindBuffer(gl.ARRAY_BUFFER, this.bufColor);
             gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, bStride * 3 * F, 0);
 
@@ -309,31 +308,31 @@ export class GraphRenderer {
         ctx.fillStyle = "white";
         ctx.font = "500 10px sans-serif";
         ctx.textAlign = "center";
-        
+
         const occupied = new Set();
         let drawn = 0;
-        
-        // Лимит меток, чтобы текст не убил FPS
-        const MAX_LABELS = 200; 
 
-        // Итерируемся по заранее отсортированным по важности меткам
+        // Label limit to preserve FPS
+        const MAX_LABELS = 200;
+
+        // Iterate through pre-sorted important labels
         for (let i = 0; i < this.labelIndices.length; i++) {
             const idx = this.labelIndices[i];
-            
-            // Если включен Grid, проверяем, попадает ли точка в видимую область
-            // (Грубая проверка: если узел далеко, нет смысла считать его координаты экрана)
+
+            // If Grid enabled, check if point is in visible area
+            // (Rough check: if node is far, no point calculating screen coords)
             if (useGrid) {
-               // Можно добавить проверку по бакетам, но проще проверить экранные координаты
+                // Could add bucket check, but easier to check screen coords
             }
 
-            // Проекция в экран
+            // Screen projection
             const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
             const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
-            
-            const sx = px;
-            const sy = h - py; // Canvas Y идет вниз
 
-            // Отсечение за экраном
+            const sx = px;
+            const sy = h - py; // Canvas Y goes down
+
+            // Culling off-screen
             if (sx < -20 || sx > w + 20 || sy < -20 || sy > h + 20) continue;
 
             // Коллизии текста (Grid-based text collision)
@@ -342,12 +341,12 @@ export class GraphRenderer {
             const key = `${gx},${gy}`;
 
             if (occupied.has(key)) continue;
-            
-            // Рисуем
+
+            // Draw
             ctx.fillText(this.dataLabels[idx], sx, sy - 5);
             occupied.add(key);
             drawn++;
-            
+
             if (drawn > MAX_LABELS) break;
         }
     }

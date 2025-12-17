@@ -1,4 +1,3 @@
-# tree_algo.py
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Iterable, Set, Callable, Any
 import re
@@ -7,8 +6,7 @@ import os
 import pandas as pd
 
 # --- Configuration constants ---
-# Параметры визуализации по умолчанию. 
-# На встрече можно сказать: "These are heuristics for tree layout to optimize screen space."
+# Default visualization parameters.
 DEFAULT_PARAMS = dict(
     x_scale=140.0,      # px per branch-length unit
     min_level_gap=56.0, # min horizontal gap between adjacent vertical stems
@@ -474,7 +472,6 @@ def build_graph(source: str, progress_callback: Optional[Callable[[str, float], 
         progress_callback=lambda p: report("layout", 25.0 + p * 0.75),
     )
     
-    # Rendering step logic was removed from here because 'render' just prepared dataframes
-    # which we already have. 
+
     
     return nodes_df, links_df

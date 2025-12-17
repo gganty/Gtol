@@ -1,31 +1,20 @@
-/**
- * loader.js
- * * Модуль для потоковой загрузки и парсинга графа.
- * * ПОЧЕМУ ТАК СЛОЖНО?
- * Стандартный JSON.parse() требует загрузки всего файла в строку. 
- * Для графа в 500МБ это создаст строку в 500МБ + объекты в памяти = Crash.
- * * РЕШЕНИЕ:
- * Мы читаем поток байт, декодируем их в текст кусочками и ищем объекты 
- * вручную, используя конечный автомат (State Machine).
- */
-
 export async function loadGraphStream(readableStream, onProgress) {
     if (!readableStream) throw new Error("No stream provided");
 
-    // 1. Настройка потока декомпрессии (GZIP)
-    // Браузер сам распаковывает .gz на лету.
+    // 1. Decompression stream setup (GZIP)
+    // Browser unpacks .gz on the fly.
     const ds = new DecompressionStream("gzip");
     const decompressedStream = readableStream.pipeThrough(ds);
     const reader = decompressedStream.getReader();
 
     const decoder = new TextDecoder("utf-8");
 
-    // 2. Выделение памяти (Typed Arrays)
-    // Аналог std::vector<float> с reserve() в C++.
-    // Используем плоские массивы для максимальной скорости GPU.
-    let capacityNodes = 1000000; // Старт с 1 млн узлов
-    let capacityLinks = 1000000; 
-    
+    // 2. Memory allocation (Typed Arrays)
+    // Analog to std::vector<float> with reserve() in C++.
+    // Use flat arrays for maximum GPU speed.
+    let capacityNodes = 1000000; // Start with 1 million nodes
+    let capacityLinks = 1000000;
+
     let nodeCount = 0;
     let linkCount = 0;
 
@@ -42,16 +31,16 @@ export async function loadGraphStream(readableStream, onProgress) {
     let linkSrc = new Uint32Array(capacityLinks);
     let linkTgt = new Uint32Array(capacityLinks);
 
-    // Буфер для склейки кусков текста
+    // Buffer for stitching text chunks
     let buffer = '';
-    // Состояние нашего конечного автомата
-    let state = 'SEARCH_NODES'; 
+    // State of our state machine
+    let state = 'SEARCH_NODES';
     let totalBytes = 0;
 
     // --- Helpers ---
 
     function resizeNodes() {
-        // Удваиваем размер (Amortized O(1) insertion)
+        // Double the size (Amortized O(1) insertion)
         capacityNodes *= 2;
         // console.log("Resizing nodes to", capacityNodes);
 
@@ -69,16 +58,16 @@ export async function loadGraphStream(readableStream, onProgress) {
         const newTgt = new Uint32Array(capacityLinks); newTgt.set(linkTgt); linkTgt = newTgt;
     }
 
-    // Быстрый парсинг цвета #RRGGBB
+    // Fast color parsing #RRGGBB
     function parseColor(hexStr, idx) {
         if (!hexStr) return;
         if (hexStr.startsWith('#')) hexStr = hexStr.slice(1);
-        
-        // Битовые сдвиги в JS медленнее parseInt для строк, так что так:
+
+        // Bitwise shifts in JS are slower than parseInt for strings, so:
         const r = parseInt(hexStr.substring(0, 2), 16) / 255.0;
         const g = parseInt(hexStr.substring(2, 4), 16) / 255.0;
         const b = parseInt(hexStr.substring(4, 6), 16) / 255.0;
-        
+
         rArr[idx] = r || 0.5;
         gArr[idx] = g || 0.5;
         bArr[idx] = b || 0.5;
@@ -91,39 +80,39 @@ export async function loadGraphStream(readableStream, onProgress) {
         if (done) break;
 
         totalBytes += value.length;
-        // Декодируем байты в текст и добавляем в хвост буфера
+        // Decode bytes to text and append to buffer tail
         buffer += decoder.decode(value, { stream: true });
 
-        // Обрабатываем буфер, пока можем извлечь данные
+        // Process buffer while we can extract data
         while (true) {
-            // STATE 1: Ищем начало списка узлов "nodes":[
+            // STATE 1: Look for start of nodes list "nodes":[
             if (state === 'SEARCH_NODES') {
                 const idx = buffer.indexOf('"nodes":[');
                 if (idx !== -1) {
-                    buffer = buffer.slice(idx + 9); // Пропускаем заголовок
+                    buffer = buffer.slice(idx + 9); // Skip header
                     state = 'IN_NODES';
                 } else {
-                    // Оставляем только "хвост" буфера на случай, если ключ разрезало пополам
-                    if (buffer.length > 50) buffer = buffer.slice(-50); 
-                    break; // Ждем больше данных
+                    // Keep only buffer tail in case key was split
+                    if (buffer.length > 50) buffer = buffer.slice(-50);
+                    break; // Wait for more data
                 }
             }
 
-            // STATE 2 & 3: Читаем объекты внутри массивов
+            // STATE 2 & 3: Read objects inside arrays
             if (state === 'IN_NODES' || state === 'IN_LINKS') {
-                // Чистим мусор (запятые, пробелы)
+                // Clean garbage (commas, spaces)
                 buffer = buffer.trimStart();
                 if (buffer.startsWith(',')) buffer = buffer.slice(1).trimStart();
 
-                // Проверка на конец массива ']'
+                // Check for array end ']'
                 if (buffer.startsWith(']')) {
                     buffer = buffer.slice(1);
-                    // Если закончили узлы -> ищем связи. Если закончили связи -> всё.
+                    // If nodes finished -> look for links. If links finished -> done.
                     state = (state === 'IN_NODES') ? 'SEARCH_LINKS' : 'DONE';
-                    
+
                     if (state === 'DONE') {
-                        // ВОЗВРАЩАЕМ РЕЗУЛЬТАТ
-                        // Обрезаем массивы (.slice) до реального количества элементов
+                        // RETURN RESULT
+                        // Trim arrays (.slice) to actual element count
                         return {
                             nodeCount, linkCount,
                             x: xArr.slice(0, nodeCount),
@@ -140,24 +129,24 @@ export async function loadGraphStream(readableStream, onProgress) {
                     continue;
                 }
 
-                // Попытка найти полный JSON-объект {...}
+                // Try to find full JSON object {...}
                 if (buffer.startsWith('{')) {
-                    // Нам нужно найти закрывающую скобку }
-                    // ВАЖНО: Просто искать '}' нельзя, так как она может быть внутри строки label.
-                    // Примитивный сканер баланса скобок:
-                    
+                    // We need to find the closing brace }
+                    // IMPORTANT: Cannot just search for '}' as it might be inside a label string.
+                    // Primitive brace balance scanner:
+
                     let endIdx = -1;
                     let braceCount = 0;
                     let inString = false;
 
                     for (let i = 0; i < buffer.length; i++) {
                         const char = buffer[i];
-                        // Если встречаем кавычку и она не экранирована
-                        if (char === '"' && buffer[i - 1] !== '\\') { 
-                            inString = !inString; 
-                            continue; 
+                        // If we meet a quote and it's not escaped
+                        if (char === '"' && buffer[i - 1] !== '\\') {
+                            inString = !inString;
+                            continue;
                         }
-                        if (inString) continue; // Внутри строки игнорируем скобки
+                        if (inString) continue; // Ignore braces inside string
 
                         if (char === '{') braceCount++;
                         else if (char === '}') {
@@ -170,55 +159,55 @@ export async function loadGraphStream(readableStream, onProgress) {
                     }
 
                     if (endIdx !== -1) {
-                        // Ура, у нас есть полный текст одного объекта
+                        // Yay, we have full text of one object
                         const objStr = buffer.slice(0, endIdx + 1);
-                        buffer = buffer.slice(endIdx + 1); // Удаляем обработанное из буфера
+                        buffer = buffer.slice(endIdx + 1); // Remove processed from buffer
 
                         try {
-                            // Парсим только этот маленький кусочек
+                            // Parse only this small chunk
                             const obj = JSON.parse(objStr);
 
                             if (state === 'IN_NODES') {
                                 if (nodeCount >= capacityNodes) resizeNodes();
-                                
+
                                 xArr[nodeCount] = obj.x;
                                 yArr[nodeCount] = obj.y;
                                 sizeArr[nodeCount] = obj.size || 2.0;
                                 parseColor(obj.color, nodeCount);
-                                labelsArr[nodeCount] = obj.label || ""; 
-                                
+                                labelsArr[nodeCount] = obj.label || "";
+
                                 nodeCount++;
                                 if (nodeCount % 50000 === 0) onProgress(`Loading nodes: ${nodeCount}`);
-                            
+
                             } else { // IN_LINKS
                                 if (linkCount >= capacityLinks) resizeLinks();
-                                
-                                linkSrc[linkCount] = obj.source; 
+
+                                linkSrc[linkCount] = obj.source;
                                 linkTgt[linkCount] = obj.target;
-                                
+
                                 linkCount++;
                                 if (linkCount % 50000 === 0) onProgress(`Loading links: ${linkCount}`);
                             }
                         } catch (e) {
                             console.warn("Skipping bad JSON chunk", e);
                         }
-                        continue; // Сразу ищем следующий объект
+                        continue; // Immediately look for next object
                     } else {
-                        // Не нашли закрывающую скобку -> объект пришел не полностью
-                        // Прерываем внутренний цикл, ждем следующий чанк из сети
-                        break; 
+                        // Closing brace not found -> object incomplete
+                        // Break inner loop, wait for next network chunk
+                        break;
                     }
                 } else {
-                    // Если мы здесь, значит буфер начинается не с '{' и не с ']'.
-                    // Возможно, мы в фазе перехода между массивами ("nodes": [...] , "links": [...])
+                    // If we are here, buffer doesn't start with '{' or ']'.
+                    // Possibly in transition phase between arrays ("nodes": [...] , "links": [...])
                     if (buffer.indexOf('"links":[') !== -1) {
-                         // Пропускаем мусор до начала links
+                        // Skip garbage until links start
                         let idx = buffer.indexOf('"links":[');
                         buffer = buffer.slice(idx + 9);
                         state = 'IN_LINKS';
                         continue;
                     }
-                    // Если совсем непонятно что — ждем данных (или это конец файла)
+                    // If unclear — wait for data (or it's EOF)
                     break;
                 }
             }
@@ -241,7 +230,7 @@ export async function loadGraphStream(readableStream, onProgress) {
         x: xArr.slice(0, nodeCount),
         y: yArr.slice(0, nodeCount),
         labels: labelsArr.slice(0, nodeCount),
-        // ... вернем то, что успели накопить, даже если поток оборвался
+        // ... return what we accumulated, even if stream broke
         size: sizeArr.slice(0, nodeCount),
         r: rArr.slice(0, nodeCount), g: gArr.slice(0, nodeCount), b: bArr.slice(0, nodeCount),
         linkSrc: linkSrc.slice(0, linkCount), linkTgt: linkTgt.slice(0, linkCount)

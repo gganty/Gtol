@@ -14,16 +14,15 @@ import hashlib
 import pandas as pd
 from typing import Optional, Dict
 
-# Импортируем нашу очищенную логику
+# Import our application logic
 from tree_algo import build_graph
 
 app = FastAPI()
 
-# Подключаем статику (наш фронтенд)
+# Mount static files (frontend)
 app.mount("/custom", StaticFiles(directory="custom_renderer"), name="custom")
 
-# ПУТЬ К ФАЙЛУ ПО УМОЛЧАНИЮ (Для кнопки "Compute" на сайте)
-# Измени этот путь на реальный файл на твоем компьютере перед демо!
+# DEFAULT TREE PATH (For the "Compute" button)
 # DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/Mammals Species.nwk"
 # DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/Chond 10Cal 10k TreeSet.tre"
 DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/UShER SARS-CoV-2 latest.nwk"
@@ -40,35 +39,35 @@ def home():
     return FileResponse("custom_renderer/index.html")
 
 # --- Async Job System ---
-# Почему мы делаем это так сложно?
-# Расчет дерева на 10M узлов занимает время (секунды/минуты).
-# Если делать это в основном потоке, сервер "зависнет" и перестанет отвечать другим пользователям.
-# Мы используем паттерн "Job Queue": клиент запускает задачу, получает ID и опрашивает статус.
+# Async Job System
+# Graph calculation can take time (seconds/minutes).
+# If done in main thread, server will freeze.
+# We use Job Queue pattern: client starts task, gets ID, polls status.
 
 class Job:
     def __init__(self):
         self.id = str(uuid.uuid4())
         self.created_at = time.time()
-        self.progress_queue = queue.Queue() # Thread-safe очередь для сообщений прогресса
+        self.progress_queue = queue.Queue() # Thread-safe queue for progress messages
         self.result: Optional[bytes] = None
         self.error: Optional[str] = None
-        self.done = threading.Event()       # Флаг завершения
+        self.done = threading.Event()       # Completion flag
         self.thread: Optional[threading.Thread] = None
 
     def post_progress(self, stage: str, progress: float):
         try:
-            # put_nowait, чтобы не блокировать рабочий поток, если очередь переполнена
+            # put_nowait to avoid blocking worker thread if queue is full
             self.progress_queue.put_nowait({"stage": stage, "progress": progress})
         except queue.Full:
             pass
 
-# Глобальное хранилище задач (в памяти)
+# Global job storage (in-memory)
 JOBS: Dict[str, Job] = {}
 
 def _cleanup_old_jobs():
-    """Удаляем задачи старше 1 часа, чтобы не забить память."""
+    """Remove jobs older than 1 hour to free memory."""
     now = time.time()
-    # Создаем список ключей для удаления, чтобы не менять словарь во время итерации
+    # Create list of keys to delete to avoid modifying dict while iterating
     to_del = [jid for jid, job in JOBS.items() if now - job.created_at > 3600]
     for jid in to_del:
         JOBS.pop(jid, None)
@@ -76,13 +75,13 @@ def _cleanup_old_jobs():
 @app.post("/api/v2/graph/start")
 def start_graph_job(use_cache: bool = True):
     """
-    Запускает тяжелый процесс расчета в фоновом потоке.
+    Starts heavy calculation process in background thread.
     """
     _cleanup_old_jobs()
     job = Job()
     JOBS[job.id] = job
 
-    # 1. Проверка Кэша (Fast Path)
+    # 1. Cache Check (Fast Path)
     print(f"[DEBUG] Request to start job. Configured Path: {DEFAULT_TREE_PATH}")
     print(f"[DEBUG] Target Cache File: {CACHE_FILE}")
     
@@ -96,44 +95,44 @@ def start_graph_job(use_cache: bool = True):
             return {"job_id": job.id}
         except Exception as e:
             print(f"[Server] Cache Read Error: {e}")
-            # Если ошибка чтения, продолжаем вычислять заново
+            # If read error, continue recalculating
 
-    # 2. Функция для потока (Worker)
+    # 2. Worker function
     def compute_worker():
         try:
             def callback(stage: str, progress: float):
                 job.post_progress(stage, progress)
 
-            # --- ЭТАП 1: Математика (CPU Bound) ---
-            # Вызываем нашу чистую функцию из tree_algo
+            # --- STAGE 1: Math (CPU Bound) ---
+            # Call our clean function from tree_algo
             nodes_df, links_df = build_graph(DEFAULT_TREE_PATH, progress_callback=callback)
             
             job.post_progress("optimization", 99.0)
             
-            # --- ЭТАП 2: Оптимизация для WebGL ---
-            # WebGL любит числа (Int/Float), он ненавидит строки.
-            # Мы переводим строковые ID ("node_A", "node_B") в индексы (0, 1, 2...).
+            # --- STAGE 2: Optimization for WebGL ---
+            # WebGL prefers numbers (Int/Float).
+            # Convert string IDs ("node_A", "node_B") to indices (0, 1, 2...).
             
             if "id" not in nodes_df.columns:
                 nodes_df["id"] = nodes_df.index
             
-            # Создаем карту: StringID -> IntID
-            # Это самая дорогая операция с памятью, но она необходима.
+            # Create map: StringID -> IntID
+            # This is memory expensive but necessary.
             id_map = {str(nid): i for i, nid in enumerate(nodes_df["id"])}
             
-            # Переписываем ссылки source/target на числа
-            # fillna(-1) нужен на случай, если ссылка ведет в никуда (битое дерево)
+            # Rewrite source/target links to numbers
+            # fillna(-1) needed for broken links
             links_df["source"] = links_df["source"].astype(str).map(id_map).fillna(-1).astype(int)
             links_df["target"] = links_df["target"].astype(str).map(id_map).fillna(-1).astype(int)
             
-            # Сами узлы теперь просто идут по порядку 0..N
+            # Nodes now are just sequential 0..N
             nodes_df["id"] = range(len(nodes_df))
             
-            # --- ЭТАП 3: Потоковая Сериализация (IO Bound) ---
+            # --- STAGE 3: Streaming Serialization (IO Bound) ---
             job.post_progress("compressing", 0.0)
             
-            # Мы пишем GZIP вручную в буфер памяти.
-            # ПОЧЕМУ? pandas.to_json() создаст гигантскую строку. Мы хотим писать чанками.
+            # Write GZIP manually to memory buffer.
+            # WHY? pandas.to_json() creates a giant string. We want to write in chunks.
             buf = io.BytesIO()
             with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
                 def write(s):
@@ -141,23 +140,23 @@ def start_graph_job(use_cache: bool = True):
 
                 write('{"nodes":[')
                 
-                # Пишем узлы кусками по 50k, чтобы не грузить RAM
+                # Write nodes in 50k chunks to save RAM
                 chunk_size = 50000
                 total_nodes = len(nodes_df)
                 
                 for i in range(0, total_nodes, chunk_size):
-                    # Превращаем кусочек DataFrame в список словарей
+                    # Convert DataFrame chunk to list of dicts
                     chunk = nodes_df.iloc[i:i+chunk_size].to_dict("records")
                     
-                    # Сериализуем кусочек. [1:-1] убирает внешние скобки массива []
+                    # Serialize chunk. [1:-1] removes external array brackets []
                     json_str = json.dumps(chunk)
                     inner = json_str[1:-1]
                     
                     if i > 0 and len(inner) > 0:
-                        write(",") # Запятая между чанками
+                        write(",") # Comma between chunks
                     write(inner)
                     
-                    # Даем другим потокам подышать
+                    # Yield to other threads
                     if i % 250000 == 0:
                         progress = 50.0 * (i / total_nodes)
                         job.post_progress("compressing", progress)
@@ -165,7 +164,7 @@ def start_graph_job(use_cache: bool = True):
 
                 write('],"links":[')
                 
-                # То же самое для связей
+                # Same for links
                 total_links = len(links_df)
                 for i in range(0, total_links, chunk_size):
                     chunk = links_df.iloc[i:i+chunk_size].to_dict("records")
@@ -181,11 +180,11 @@ def start_graph_job(use_cache: bool = True):
                          job.post_progress("compressing", progress)
                          time.sleep(0)
 
-                write(']}') # Закрываем JSON
+                write(']}') # Close JSON
 
             job.result = buf.getvalue()
             
-            # Сохраняем в кэш на диск
+            # Save to disk cache
             try:
                 with open(CACHE_FILE, "wb") as f:
                      f.write(job.result)
@@ -203,7 +202,7 @@ def start_graph_job(use_cache: bool = True):
         finally:
             job.done.set()
 
-    # Запускаем поток
+    # Start thread
     job.thread = threading.Thread(target=compute_worker, daemon=True)
     job.thread.start()
     
@@ -212,8 +211,8 @@ def start_graph_job(use_cache: bool = True):
 @app.get("/api/v2/graph/{job_id}/progress")
 async def get_job_progress(job_id: str):
     """
-    SSE (Server-Sent Events) эндпоинт.
-    Держит соединение открытым и шлет обновления статуса в реальном времени.
+    SSE (Server-Sent Events) endpoint.
+    Keeps connection open and sends real-time status updates.
     """
     job = JOBS.get(job_id)
     if not job:
@@ -222,22 +221,22 @@ async def get_job_progress(job_id: str):
     async def event_generator():
         while True:
             try:
-                # Если задача завершена и очередь пуста -> сообщаем финиш и выходим
+                # If job done and queue empty -> signal finish and exit
                 if job.done.is_set() and job.progress_queue.empty():
                     yield f"data: {json.dumps({'stage': 'complete', 'progress': 100.0})}\n\n"
                     break
 
                 try:
-                    # Ждем сообщения из очереди (с таймаутом, чтобы не висеть вечно)
+                    # Wait for queue message (with timeout to avoid hanging)
                     update = job.progress_queue.get(timeout=0.5)
                     yield f"data: {json.dumps(update)}\n\n"
                     if update.get("stage") == "error":
                         break
                 except queue.Empty:
-                    # Если сообщений нет, но задача сделана - выходим на след. итерации
+                    # If no messages but job done - exit on next iteration
                     if job.done.is_set():
                          continue
-                    # Иначе просто шлем "keep-alive" паузу
+                    # Otherwise send "keep-alive" pause
                     await asyncio.sleep(0.1)
             except Exception:
                 break
@@ -251,7 +250,7 @@ async def get_job_progress(job_id: str):
 @app.get("/api/v2/graph/{job_id}/result")
 def get_job_result(job_id: str):
     """
-    Отдает готовый бинарный файл (gzip).
+    Returns ready binary file (gzip).
     """
     job = JOBS.get(job_id)
     if not job: return {"error": "Job not found"}, 404
@@ -264,7 +263,7 @@ def get_job_result(job_id: str):
         media_type="application/octet-stream",
         headers={
             "Content-Disposition": "attachment; filename=graph.json.gz",
-            # Важно: Не ставим Content-Encoding: gzip, иначе браузер распакует его сам,
-            # а наш JS loader ожидает именно сжатый поток байт!
+            # Important: Do not set Content-Encoding: gzip, otherwise browser unpacks it,
+            # and our JS loader expects compressed byte stream!
         }
     )
