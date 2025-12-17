@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Tree Viewer (WebGL)</title>
+    <style>
+        /* Темная тема для "Pro" софта */
+        body {
+            margin: 0;
+            background: #050505;
+            color: #fff;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+
+        /* Слои канвасов на весь экран */
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        /* WebGL слой внизу (z-index по умолчанию 0) */
+        #glcanvas {
+            z-index: 1;
+        }
+
+        /* Текстовый слой поверх (pointer-events: none, чтобы клики проходили сквозь него) */
+        #text-canvas {
+            z-index: 2;
+            pointer-events: none;
+        }
+
+        /* Плавающая панель управления */
+        #ui {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            width: 280px;
+            z-index: 10;
+            background: rgba(20, 20, 20, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            color: white;
+            transition: transform 0.1s;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        #btn-compute {
+            background: #3b82f6;
+        }
+
+        /* Синий */
+        #btn-load-file {
+            background: #10b981;
+        }
+
+        /* Зеленый */
+
+        /* Полоса загрузки */
+        #progress-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 15px;
+        }
+
+        #progress-bar {
+            height: 100%;
+            background: #3b82f6;
+            width: 0%;
+            transition: width 0.2s;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .label {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: #888;
+            font-weight: bold;
+        }
+
+        #status {
+            font-size: 13px;
+            margin-bottom: 10px;
+            color: #ccc;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <h3>Tree Viewer</h3>
+        <div id="status">Ready</div>
+
+        <div class="section">
+            <span class="label">Server Compute</span>
+            <button id="btn-compute">Compute Graph</button>
+        </div>
+
+        <div class="section">
+            <span class="label">Local Visualization</span>
+            <input type="file" id="file-input" accept=".gz,.json" style="width:100%; margin-top:5px; color:#aaa;">
+            <button id="btn-load-file">Render File</button>
+        </div>
+
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+    </div>
+
+    <canvas id="glcanvas"></canvas>
+    <canvas id="text-canvas"></canvas>
+
+    <script type="module">
+        import { GraphRenderer } from '/custom/engine.js';
+        import { loadGraphStream } from '/custom/loader.js';
+
+        // Инициализация Canvas
+        const canvas = document.getElementById('glcanvas');
+        const textCanvas = document.getElementById('text-canvas');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            textCanvas.width = window.innerWidth;
+            textCanvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Инициализация движка
+        let renderer;
+        try {
+            renderer = new GraphRenderer(canvas);
+            renderer.setTextCanvas(textCanvas);
+        } catch (e) {
+            document.getElementById('status').innerText = "WebGL Error: " + e.message;
+        }
+
+        const statusEl = document.getElementById('status');
+        const progressEl = document.getElementById('progress-bar');
+
+        // --- LOGIC 1: COMPUTE (Server Side -> Download Only) ---
+        document.getElementById('btn-compute').addEventListener('click', async () => {
+            statusEl.innerText = "Starting job...";
+            progressEl.style.width = '0%';
+
+            // 1. Запускаем задачу
+            const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
+            const { job_id } = await res.json();
+
+            // 2. Подписываемся на прогресс (SSE)
+            const evtSource = new EventSource(`/api/v2/graph/${job_id}/progress`);
+
+            evtSource.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+
+                if (msg.stage === 'complete') {
+                    evtSource.close();
+                    statusEl.innerText = "Downloading Result...";
+
+                    // 3. Скачиваем результат как файл (БЕЗ РЕНДЕРИНГА)
+                    const link = document.createElement('a');
+                    link.href = `/api/v2/graph/${job_id}/result`;
+                    link.download = `graph_${job_id}.json.gz`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+
+                    statusEl.innerText = "Done (File Downloaded)";
+                    progressEl.style.width = '100%';
+
+                } else if (msg.stage === 'error') {
+                    statusEl.innerText = "Error: " + msg.error;
+                    evtSource.close();
+                } else {
+                    statusEl.innerText = `${msg.stage} ${Math.round(msg.progress)}%`;
+                    progressEl.style.width = `${msg.progress}%`;
+                }
+            };
+        });
+
+        // --- LOGIC 2: RENDER (Local File OR Server Cache) ---
+        document.getElementById('btn-load-file').addEventListener('click', async () => {
+            const fileInput = document.getElementById('file-input');
+
+            if (fileInput.files.length > 0) {
+                // ВАРИАНТ А: Рендер локального файла
+                statusEl.innerText = "Reading local file...";
+                await processStream(fileInput.files[0].stream());
+            } else {
+                // ВАРИАНТ Б: Рендер кэша с сервера (если файл не выбран)
+                statusEl.innerText = "Fetching server cache...";
+
+                // Триггерим "старт" с кэшем, чтобы получить ID
+                const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
+                const { job_id } = await res.json();
+
+                // Ждем пока работа завершится (вдруг кэша нет и он начал считать?)
+                // Но мы предполагаем, что юзер уже нажал Compute, так что просто качаем.
+                // В идеале можно так же подписаться на SSE, но для простоты запросим result сразу.
+                // Если result не готов, сервер вернет 400.
+
+                // Для надежности: просто идем в тот же SSE цикл, но с флагом "render_after"
+                // Или просто фетчим стрим.
+
+                statusEl.innerText = "Downloading stream...";
+                const resultRes = await fetch(`/api/v2/graph/${job_id}/result`);
+                if (resultRes.ok) {
+                    await processStream(resultRes.body);
+                } else {
+                    statusEl.innerText = "Error: Cache not ready. Click Compute first.";
+                }
+            }
+        });
+
+        // --- SHARED: STREAM PROCESSING ---
+        async function processStream(stream) {
+            statusEl.innerText = "Parsing & Rendering...";
+
+            // Вызываем наш кастомный парсер из loader.js
+            const data = await loadGraphStream(stream, (msg) => {
+                statusEl.innerText = msg;
+            });
+
+            statusEl.innerText = `Rendered ${data.nodeCount.toLocaleString()} nodes`;
+            progressEl.style.width = '100%';
+
+            // Auto-Fit (Центрирование камеры)
+            // ... (упрощенный расчет bounds для старта) ...
+            renderer.setData(data);
+
+            // Сброс камеры
+            renderer.setTransform(-data.x[0] + canvas.width / 2, -data.y[0] + canvas.height / 2, 0.5);
+        }
+
+        // --- INTERACTION (Mouse & Wheel) ---
+        let transform = { x: 0, y: 0, k: 0.1 }; // Start zoomed out
+        let isDragging = false;
+        let lastX = 0, lastY = 0;
+
+        canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastX = e.clientX; lastY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', () => {
+            isDragging = false;
+            // Когда отпускаем мышь - рисуем в высоком качестве
+            renderer.setTransform(transform.x, transform.y, transform.k, false);
+        });
+
+        canvas.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            lastX = e.clientX; lastY = e.clientY;
+
+            // Pan logic
+            transform.x += dx / transform.k;
+            transform.y -= dy / transform.k; // Y WebGL часто инвертирован
+
+            // isInteracting=true (рисуем быстро, с пропуском точек)
+            renderer.setTransform(transform.x, transform.y, transform.k, true);
+        });
+
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            // Zoom logic towards mouse pointer
+            const zoomFactor = 1.05;
+            const direction = e.deltaY > 0 ? 1 / zoomFactor : zoomFactor;
+
+            const mx = e.clientX;
+            const my = canvas.height - e.clientY; // Invert Y for math
+
+            // Математика зума "в точку курсора"
+            // WorldX = (ScreenX / k) - tx
+
+            const wx_before = mx / transform.k - transform.x;
+            const wy_before = my / transform.k - transform.y;
+
+            transform.k *= direction;
+
+            // Мы хотим, чтобы wx_before осталось там же
+            // wx_before = mx / new_k - new_tx
+            // new_tx = mx / new_k - wx_before
+
+            transform.x = mx / transform.k - wx_before;
+            transform.y = my / transform.k - wy_before;
+
+            renderer.setTransform(transform.x, transform.y, transform.k, true);
+
+            // Debounce high quality render
+            clearTimeout(window.zoomTimer);
+            window.zoomTimer = setTimeout(() => {
+                renderer.setTransform(transform.x, transform.y, transform.k, false);
+            }, 200);
+        }, { passive: false });
+
+    </script>
+</body>
+
+</html>
