@@ -38,9 +38,14 @@ export class GraphRenderer {
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
         // Extension for indices > 65535 (critical for large graphs)
+        this.ext = this.gl.getExtension('OES_element_index_uint');
 
         this.ctx = null;
         this.transform = { x: 0, y: 0, k: 1.0 };
+        this.isInteracting = false;
+        this.pendingFrame = null;
+        this.bufLOD = this.gl.createBuffer();
+        this.lodCount = 0;
     }
 
     setTextCanvas(canvas) {
@@ -172,7 +177,22 @@ export class GraphRenderer {
         this.bufSpatial = this.gl.createBuffer();
         this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
         this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, spatialIndices, this.gl.STATIC_DRAW);
+        this.spatialIndices = spatialIndices; // Expose for Label Renderer
         console.timeEnd("SpatialGrid");
+
+        // --- LOD BUFFER BUILD (Uniform Downsampling) ---
+        // Target ~200k points for interaction
+        const LOD_TARGET = 200000;
+        const stride = Math.max(5, Math.ceil(this.nodeCount / LOD_TARGET));
+        const lodIndices = [];
+        for (let i = 0; i < this.nodeCount; i += stride) {
+            lodIndices.push(i);
+        }
+        this.lodCount = lodIndices.length;
+        const lodData = new Uint32Array(lodIndices);
+
+        this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.bufLOD);
+        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, lodData, this.gl.STATIC_DRAW);
 
         // Labels prep
         let candidates = [];
@@ -183,7 +203,7 @@ export class GraphRenderer {
         this.labelIndices = new Uint32Array(candidates);
     }
 
-    render(stride = 1) {
+    render() {
         const gl = this.gl;
         const w = this.canvas.width;
         const h = this.canvas.height;
@@ -193,26 +213,19 @@ export class GraphRenderer {
 
         const { x: tx, y: ty, k } = this.transform;
 
-        // --- CULLING LOGIC (Restored) ---
-        // Calculate which grid cells are visible
+        // --- CULLING LOGIC ---
         let visibleBuckets = [];
         let visiblePoints = 0;
-        let useGrid = false;
 
-        // Use grid only if data is ready and zoom is deep enough
-        // (if zoom is shallow and whole tree is visible, easier to draw everything as array)
-        if (this.gridBounds && this.ext && stride === 1) {
-            useGrid = true;
-            const screenMinX = -w; const screenMaxX = 2 * w; // Add margin
+        if (this.gridBounds && this.ext) {
+            const screenMinX = -w; const screenMaxX = 2 * w;
             const screenMinY = -h; const screenMaxY = 2 * h;
 
-            // Inverse projection: Screen -> World
             const worldMinX = screenMinX / k - tx;
             const worldMaxX = screenMaxX / k - tx;
-            const worldMinY = (h - screenMaxY) / k - ty; // Y inverted
+            const worldMinY = (h - screenMaxY) / k - ty;
             const worldMaxY = (h - screenMinY) / k - ty;
 
-            // Find grid index ranges
             const gx1 = Math.floor(((worldMinX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
             const gx2 = Math.floor(((worldMaxX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
             const gy1 = Math.floor(((Math.min(worldMinY, worldMaxY) - this.gridBounds.minY) / this.gridBounds.height) * this.gridRes);
@@ -233,14 +246,28 @@ export class GraphRenderer {
                     }
                 }
             }
+        } else {
+            visiblePoints = this.nodeCount;
         }
 
-        // If too few points (we are very deep), disable stride completely
-        let effectiveStride = stride;
-        if (stride > 1 && visiblePoints < 500000) effectiveStride = 1;
+        // --- HYBRID DECISION ---
+        // 1. Zoomed In (visiblePoints low) -> Always use Grid (Best Quality & Speed)
+        // 2. Zoomed Out + Interacting -> Use LOD (Uniform Downsampling)
+        // 3. Zoomed Out + Static -> Use Grid (Full Quality)
 
-        // 1. Draw Links
-        if (effectiveStride === 1 && this.linkCount > 0 && this.bufLinkPos) {
+        const BUDGET = 200000;
+        let useLOD = false;
+
+        if (this.isInteracting) {
+            // If we see FEWER points than our LOD budget, just draw them exactly (Grid).
+            // This fixes the "Zoom In" lag where downsampling was actually slower/worse.
+            if (visiblePoints > BUDGET) {
+                useLOD = true;
+            }
+        }
+
+        // 1. Draw Links (Hide during interaction if using LOD)
+        if (!useLOD && this.linkCount > 0 && this.bufLinkPos) {
             gl.useProgram(this.programLine);
             gl.uniform2f(this.locLineRes, w, h);
             gl.uniform3f(this.locLineTrans, tx, ty, k);
@@ -268,37 +295,25 @@ export class GraphRenderer {
         gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locColor);
 
-        if (useGrid) {
-            // GRID DRAW (Culling active)
+        if (useLOD) {
+            // LOD DRAW (Downsampled via Index Buffer)
+            // Draws ~200k points uniformly distributed across the WHOLE graph
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufLOD);
+            gl.drawElements(gl.POINTS, this.lodCount, gl.UNSIGNED_INT, 0);
+        } else if (this.ext && this.gridBounds) {
+            // GRID DRAW (Culling / Full Detail)
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
             for (const bucket of visibleBuckets) {
-                // Draw only points from current visible cell
-                // offset * 4 because UINT32 indices take 4 bytes
                 gl.drawElements(gl.POINTS, bucket.count, gl.UNSIGNED_INT, bucket.offset * 4);
             }
         } else {
-            // STRIDE DRAW (Fast draw or whole tree)
-            // Requires stride hack in vertexAttribPointer
-            const bStride = effectiveStride;
-            const F = 4; // float bytes
-
-            // Rebind attributes with Stride
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
-            gl.vertexAttribPointer(this.locPos, 2, gl.FLOAT, false, bStride * 2 * F, 0);
-
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufSize);
-            gl.vertexAttribPointer(this.locSize, 1, gl.FLOAT, false, bStride * 1 * F, 0);
-
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufColor);
-            gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, bStride * 3 * F, 0);
-
-            const drawCount = Math.floor(this.nodeCount / effectiveStride);
-            gl.drawArrays(gl.POINTS, 0, drawCount);
+            // Fallback (No extension? Should not happen if fixed)
+            gl.drawArrays(gl.POINTS, 0, this.nodeCount);
         }
 
         // 3. Labels
-        if (this.ctx && effectiveStride === 1 && this.labelIndices) {
-            this.renderLabels(w, h, visibleBuckets, useGrid);
+        if (this.ctx && this.labelIndices) {
+            this.renderLabels(w, h, visibleBuckets, !useLOD);
         }
     }
 
@@ -306,38 +321,67 @@ export class GraphRenderer {
         const ctx = this.ctx;
         ctx.clearRect(0, 0, w, h);
         ctx.fillStyle = "white";
-        ctx.font = "500 10px sans-serif";
+        ctx.font = "500 10.5px sans-serif";
         ctx.textAlign = "center";
 
         const occupied = new Set();
         let drawn = 0;
+        const MAX_LABELS = 2000;
 
-        // Label limit to preserve FPS
-        const MAX_LABELS = 200;
+        // --- HYBRID LABEL STRATEGY ---
+        // A. Zoomed In (useGrid=true): Iterate SPATIAL buckets. Fast & Exact.
+        // B. Zoomed Out (useGrid=false): Iterate IMPORTANCE list. Good covers.
 
-        // Iterate through pre-sorted important labels
-        for (let i = 0; i < this.labelIndices.length; i++) {
-            const idx = this.labelIndices[i];
+        let candidates = [];
 
-            // If Grid enabled, check if point is in visible area
-            // (Rough check: if node is far, no point calculating screen coords)
-            if (useGrid) {
-                // Could add bucket check, but easier to check screen coords
+        if (useGrid && this.spatialIndices && visibleBuckets.length > 0) {
+            // SPATIAL LOOKUP (Iterate only visible buckets)
+            // Limit buckets if too many to prevent slow loops
+            // (If visibleBuckets is huge, we are probably not deeply zoomed, but useGrid flags handles that)
+            let count = 0;
+            for (const bucket of visibleBuckets) {
+                // Indices in spatialIndices are contiguous per bucket
+                const start = bucket.offset;
+                const end = bucket.offset + bucket.count;
+                for (let i = start; i < end; i++) {
+                    candidates.push(this.spatialIndices[i]);
+                    count++;
+                    if (count > 20000) break; // Hard limit for safety
+                }
+                if (count > 20000) break;
             }
+            // Sort spatial candidates by size/importance roughly? 
+            // Better: just filter by importance since spatialIndices is random order
+            // Actually, spatialIndices is just position. 
+            // We need to prioritize important nodes within the visible set.
+            // Fast approach: Check standard important list against visible bounds?
+            // "candidates" here contains ALL visible points (e.g. 500 points).
+            // This is perfect. we just draw them.
+        } else {
+            // IMPORTANCE LOOKUP (Legacy)
+            // Iterate top nodes globally
+            // candidates is just an iterator simulation or we just iterate directly
+        }
+
+        const iterator = (useGrid && candidates.length > 0) ? candidates : this.labelIndices;
+        const limit = (useGrid && candidates.length > 0) ? candidates.length : this.labelIndices.length;
+
+        for (let i = 0; i < limit; i++) {
+            const idx = iterator[i];
 
             // Screen projection
             const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
             const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
 
             const sx = px;
-            const sy = h - py; // Canvas Y goes down
+            const sy = h - py;
 
-            // Culling off-screen
+            // Culling off-screen (Strict)
             if (sx < -20 || sx > w + 20 || sy < -20 || sy > h + 20) continue;
 
-            // Коллизии текста (Grid-based text collision)
+            // Text collision
             const gx = Math.floor(sx / 100);
-            const gy = Math.floor(sy / 20);
+            const gy = Math.floor(sy / 24);
             const key = `${gx},${gy}`;
 
             if (occupied.has(key)) continue;
@@ -353,6 +397,13 @@ export class GraphRenderer {
 
     setTransform(x, y, k, isInteracting = false) {
         this.transform = { x, y, k };
-        requestAnimationFrame(() => this.render(isInteracting ? 5 : 1));
+        this.isInteracting = isInteracting;
+
+        if (!this.pendingFrame) {
+            this.pendingFrame = requestAnimationFrame(() => {
+                this.pendingFrame = null;
+                this.render();
+            });
+        }
     }
 }

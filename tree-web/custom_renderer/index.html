@@ -293,7 +293,7 @@
         canvas.addEventListener('wheel', e => {
             e.preventDefault();
             // Zoom logic towards mouse pointer
-            const zoomFactor = 1.05;
+            const zoomFactor = 1.035;
             const direction = e.deltaY > 0 ? 1 / zoomFactor : zoomFactor;
 
             const mx = e.clientX;
