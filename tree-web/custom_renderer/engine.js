@@ -321,7 +321,7 @@ export class GraphRenderer {
         const ctx = this.ctx;
         ctx.clearRect(0, 0, w, h);
         ctx.fillStyle = "white";
-        ctx.font = "500 10.5px sans-serif";
+        ctx.font = "500 10px sans-serif";
         ctx.textAlign = "center";
 
         const occupied = new Set();
