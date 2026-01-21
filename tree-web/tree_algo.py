@@ -185,11 +185,18 @@ def parse_newick(newick: str, progress_callback: Optional[Callable[[float], None
 def _collect_leaves(nodes: Dict[str, TNode], u: str) -> List[str]:
     if not nodes[u].children:
         return [u]
+    
     acc: List[str] = []
-    # Using iterative stack to avoid RecursionError on deep trees? 
-    # Current impl is recursive, fine for typical trees, but be aware.
-    for c in nodes[u].children:
-        acc.extend(_collect_leaves(nodes, c))
+    stack = [u]
+    
+    while stack:
+        curr = stack.pop()
+        node = nodes[curr]
+        if not node.children:
+            acc.append(curr)
+        else:
+            for i in range(len(node.children) - 1, -1, -1):
+                stack.append(node.children[i])
     return acc
 
 def _find_root(nodes: Dict[str, TNode]) -> str:
