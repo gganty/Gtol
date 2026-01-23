@@ -44,8 +44,6 @@ export class GraphRenderer {
         this.transform = { x: 0, y: 0, k: 1.0 };
         this.isInteracting = false;
         this.pendingFrame = null;
-        this.bufLOD = this.gl.createBuffer();
-        this.lodCount = 0;
     }
 
     setTextCanvas(canvas) {
@@ -126,81 +124,114 @@ export class GraphRenderer {
             gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
         }
 
-        // --- SPATIAL GRID BUILD ---
-        console.time("SpatialGrid");
+        console.time("AdaptiveGrid");
 
         // A. Bounds
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i < this.nodeCount; i += 100) {
+        for (let i = 0; i < this.nodeCount; i++) {
             const x = data.x[i]; const y = data.y[i];
             if (x < minX) minX = x; if (x > maxX) maxX = x;
             if (y < minY) minY = y; if (y > maxY) maxY = y;
         }
-        minX -= 100; maxX += 100; minY -= 100; maxY += 100;
-        this.gridBounds = { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
+        // Small padding
+        const padX = (maxX - minX) * 0.01;
+        const padY = (maxY - minY) * 0.01;
+        minX -= padX; maxX += padX; minY -= padY; maxY += padY;
 
-        // B. Counting
-        const GRID_RES = 64;
-        this.gridRes = GRID_RES;
-        this.gridCounts = new Uint32Array(GRID_RES * GRID_RES);
-        this.gridOffsets = new Uint32Array(GRID_RES * GRID_RES);
+        const width = maxX - minX;
+        const height = maxY - minY;
 
-        const getBucket = (x, y) => {
-            let bx = Math.floor(((x - minX) / this.gridBounds.width) * GRID_RES);
-            let by = Math.floor(((y - minY) / this.gridBounds.height) * GRID_RES);
-            if (bx < 0) bx = 0; if (bx >= GRID_RES) bx = GRID_RES - 1;
-            if (by < 0) by = 0; if (by >= GRID_RES) by = GRID_RES - 1;
-            return by * GRID_RES + bx;
+        // B. Calculate Dynamic Grid Resolution based on Aspect Ratio
+        // Target ~4096 chunks for fine-grained culling and deep zoom support.
+        const TARGET_CHUNKS = 4096;
+        const aspect = width / height;
+
+        // cols * rows = TARGET
+        // cols / rows = aspect -> cols = rows * aspect
+        // rows * aspect * rows = TARGET -> rows^2 = TARGET / aspect
+        let nRows = Math.sqrt(TARGET_CHUNKS / aspect);
+        let nCols = nRows * aspect;
+
+        // Clamp & Integerize
+        if (nRows < 1) nRows = 1;
+        if (nCols < 1) nCols = 1;
+        nRows = Math.ceil(nRows);
+        nCols = Math.ceil(nCols);
+
+        this.grid = {
+            minX, maxX, minY, maxY, width, height,
+            nCols, nRows,
+            chunks: new Array(nCols * nRows)
         };
 
+        // C. Assign Nodes to Chunks
+        // Helpers
+        const getChunkIdx = (x, y) => {
+            let cx = Math.floor(((x - minX) / width) * nCols);
+            let cy = Math.floor(((y - minY) / height) * nRows);
+            if (cx >= nCols) cx = nCols - 1; if (cx < 0) cx = 0;
+            if (cy >= nRows) cy = nRows - 1; if (cy < 0) cy = 0;
+            return cy * nCols + cx;
+        };
+
+        // 1. Count
+        const counts = new Uint32Array(nCols * nRows);
         for (let i = 0; i < this.nodeCount; i++) {
-            this.gridCounts[getBucket(data.x[i], data.y[i])]++;
+            counts[getChunkIdx(data.x[i], data.y[i])]++;
         }
 
-        // C. Offsets
+        // 2. Offsets (for temporary sorting bucket)
+        const offsets = new Uint32Array(nCols * nRows);
         let accum = 0;
-        for (let i = 0; i < this.gridCounts.length; i++) {
-            this.gridOffsets[i] = accum;
-            accum += this.gridCounts[i];
+        for (let i = 0; i < counts.length; i++) {
+            offsets[i] = accum;
+            accum += counts[i];
+
+            // Init chunk metadata
+            this.grid.chunks[i] = {
+                id: i,
+                offset: offsets[i], // Offset in the sorted index buffer
+                count: counts[i],
+                // Store spatial bounds of chunk for culling
+                x1: minX + (i % nCols) * (width / nCols),
+                x2: minX + (i % nCols + 1) * (width / nCols),
+                y1: minY + Math.floor(i / nCols) * (height / nRows),
+                y2: minY + Math.floor(i / nCols + 1) * (height / nRows)
+            };
         }
 
-        // D. Index Buffer
-        const currOffsets = new Uint32Array(this.gridOffsets);
-        const spatialIndices = new Uint32Array(this.nodeCount);
+        // 3. Fill Indices (Unsorted first, but grouped by chunk)
+        // We will then sort WITHIN each chunk range.
+        const sortedIndices = new Uint32Array(this.nodeCount);
+        const currOffsets = new Uint32Array(offsets);
 
+        // Pre-fill grouping
         for (let i = 0; i < this.nodeCount; i++) {
-            const b = getBucket(data.x[i], data.y[i]);
-            const pos = currOffsets[b]++;
-            spatialIndices[pos] = i;
+            const c = getChunkIdx(data.x[i], data.y[i]);
+            sortedIndices[currOffsets[c]++] = i;
         }
 
+        // 4. Sort Each Chunk by Importance (Size)
+        // This is crucial for Linear LOD. The first N indices of a chunk ARE the most important.
+        for (let i = 0; i < this.grid.chunks.length; i++) {
+            const chunk = this.grid.chunks[i];
+            if (chunk.count === 0) continue;
+
+            const start = chunk.offset;
+            const end = chunk.offset + chunk.count;
+
+            // Subarray view
+            const sub = sortedIndices.subarray(start, end);
+            sub.sort((a, b) => data.size[b] - data.size[a]);
+        }
+
+        // Upload to Index Buffer
         this.bufSpatial = this.gl.createBuffer();
         this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
-        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, spatialIndices, this.gl.STATIC_DRAW);
-        this.spatialIndices = spatialIndices; // Expose for Label Renderer
-        console.timeEnd("SpatialGrid");
+        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, sortedIndices, this.gl.STATIC_DRAW);
 
-        // --- LOD BUFFER BUILD (Uniform Downsampling) ---
-        // Target ~200k points for interaction
-        const LOD_TARGET = 200000;
-        const stride = Math.max(5, Math.ceil(this.nodeCount / LOD_TARGET));
-        const lodIndices = [];
-        for (let i = 0; i < this.nodeCount; i += stride) {
-            lodIndices.push(i);
-        }
-        this.lodCount = lodIndices.length;
-        const lodData = new Uint32Array(lodIndices);
-
-        this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.bufLOD);
-        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, lodData, this.gl.STATIC_DRAW);
-
-        // Labels prep
-        let candidates = [];
-        for (let i = 0; i < this.nodeCount; i++) {
-            if (data.labels[i]) candidates.push(i);
-        }
-        candidates.sort((a, b) => data.size[b] - data.size[a]);
-        this.labelIndices = new Uint32Array(candidates);
+        this.sortedIndices = sortedIndices; // Expose for Labels
+        console.timeEnd("AdaptiveGrid");
     }
 
     render() {
@@ -211,63 +242,44 @@ export class GraphRenderer {
         gl.clearColor(0.04, 0.06, 0.08, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
+        if (!this.grid) return; // Not loaded
+
         const { x: tx, y: ty, k } = this.transform;
 
-        // --- CULLING LOGIC ---
-        let visibleBuckets = [];
-        let visiblePoints = 0;
+        // 1. Calculate World View
+        const screenMinX = -w; const screenMaxX = 2 * w;
+        const screenMinY = -h; const screenMaxY = 2 * h;
 
-        if (this.gridBounds && this.ext) {
-            const screenMinX = -w; const screenMaxX = 2 * w;
-            const screenMinY = -h; const screenMaxY = 2 * h;
+        const worldMinX = screenMinX / k - tx;
+        const worldMaxX = screenMaxX / k - tx;
+        const worldMinY = (h - screenMaxY) / k - ty;
+        const worldMaxY = (h - screenMinY) / k - ty;
 
-            const worldMinX = screenMinX / k - tx;
-            const worldMaxX = screenMaxX / k - tx;
-            const worldMinY = (h - screenMaxY) / k - ty;
-            const worldMaxY = (h - screenMinY) / k - ty;
+        // 2. Determine Visible Chunks
+        const visibleChunks = [];
+        let potentialPoints = 0;
 
-            const gx1 = Math.floor(((worldMinX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
-            const gx2 = Math.floor(((worldMaxX - this.gridBounds.minX) / this.gridBounds.width) * this.gridRes);
-            const gy1 = Math.floor(((Math.min(worldMinY, worldMaxY) - this.gridBounds.minY) / this.gridBounds.height) * this.gridRes);
-            const gy2 = Math.floor(((Math.max(worldMinY, worldMaxY) - this.gridBounds.minY) / this.gridBounds.height) * this.gridRes);
-
-            const bxStart = Math.max(0, gx1);
-            const bxEnd = Math.min(this.gridRes - 1, gx2);
-            const byStart = Math.max(0, gy1);
-            const byEnd = Math.min(this.gridRes - 1, gy2);
-
-            for (let by = byStart; by <= byEnd; by++) {
-                for (let bx = bxStart; bx <= bxEnd; bx++) {
-                    const b = by * this.gridRes + bx;
-                    const count = this.gridCounts[b];
-                    if (count > 0) {
-                        visiblePoints += count;
-                        visibleBuckets.push({ offset: this.gridOffsets[b], count: count });
-                    }
-                }
+        for (const chunk of this.grid.chunks) {
+            if (chunk.count === 0) continue;
+            if (chunk.x2 < worldMinX || chunk.x1 > worldMaxX ||
+                chunk.y2 < worldMinY || chunk.y1 > worldMaxY) {
+                continue;
             }
-        } else {
-            visiblePoints = this.nodeCount;
+            visibleChunks.push(chunk);
+            potentialPoints += chunk.count;
         }
 
-        // --- HYBRID DECISION ---
-        // 1. Zoomed In (visiblePoints low) -> Always use Grid (Best Quality & Speed)
-        // 2. Zoomed Out + Interacting -> Use LOD (Uniform Downsampling)
-        // 3. Zoomed Out + Static -> Use Grid (Full Quality)
+        // 3. Dynamic Draw Count Calculation
+        const MAX_VERTS = 1000000; // Global Budget
 
-        const BUDGET = 200000;
-        let useLOD = false;
-
-        if (this.isInteracting) {
-            // If we see FEWER points than our LOD budget, just draw them exactly (Grid).
-            // This fixes the "Zoom In" lag where downsampling was actually slower/worse.
-            if (visiblePoints > BUDGET) {
-                useLOD = true;
-            }
+        let lodRatio = 1.0;
+        if (potentialPoints > MAX_VERTS) {
+            lodRatio = MAX_VERTS / potentialPoints;
         }
 
-        // 1. Draw Links (Hide during interaction if using LOD)
-        if (!useLOD && this.linkCount > 0 && this.bufLinkPos) {
+        // 4. Draw
+        // Links
+        if (potentialPoints < 500000 && this.bufLinkPos) {
             gl.useProgram(this.programLine);
             gl.uniform2f(this.locLineRes, w, h);
             gl.uniform3f(this.locLineTrans, tx, ty, k);
@@ -277,7 +289,7 @@ export class GraphRenderer {
             gl.drawArrays(gl.LINES, 0, this.linkCount * 2);
         }
 
-        // 2. Draw Points
+        // Points
         gl.useProgram(this.program);
         gl.uniform2f(this.locRes, w, h);
         gl.uniform3f(this.locTrans, tx, ty, k);
@@ -295,29 +307,24 @@ export class GraphRenderer {
         gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locColor);
 
-        if (useLOD) {
-            // LOD DRAW (Downsampled via Index Buffer)
-            // Draws ~200k points uniformly distributed across the WHOLE graph
-            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufLOD);
-            gl.drawElements(gl.POINTS, this.lodCount, gl.UNSIGNED_INT, 0);
-        } else if (this.ext && this.gridBounds) {
-            // GRID DRAW (Culling / Full Detail)
-            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
-            for (const bucket of visibleBuckets) {
-                gl.drawElements(gl.POINTS, bucket.count, gl.UNSIGNED_INT, bucket.offset * 4);
+        // Bind Sorted Index Buffer
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
+
+        for (const chunk of visibleChunks) {
+            const drawCount = Math.ceil(chunk.count * lodRatio);
+
+            if (drawCount > 0) {
+                gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, chunk.offset * 4);
             }
-        } else {
-            // Fallback (No extension? Should not happen if fixed)
-            gl.drawArrays(gl.POINTS, 0, this.nodeCount);
         }
 
-        // 3. Labels
-        if (this.ctx && this.labelIndices) {
-            this.renderLabels(w, h, visibleBuckets, !useLOD);
+        // 5. Labels
+        if (this.ctx) {
+            this.renderLabels(w, h, visibleChunks, lodRatio);
         }
     }
 
-    renderLabels(w, h, visibleBuckets, useGrid) {
+    renderLabels(w, h, visibleChunks, lodRatio) {
         const ctx = this.ctx;
         ctx.clearRect(0, 0, w, h);
         ctx.fillStyle = "white";
@@ -326,72 +333,73 @@ export class GraphRenderer {
 
         const occupied = new Set();
         let drawn = 0;
-        const MAX_LABELS = 2000;
+        const MAX_LABELS = 400;
 
-        // --- HYBRID LABEL STRATEGY ---
-        // A. Zoomed In (useGrid=true): Iterate SPATIAL buckets. Fast & Exact.
-        // B. Zoomed Out (useGrid=false): Iterate IMPORTANCE list. Good covers.
+        // FIX: Sort chunks by distance to center of screen.
+        // Currently we iterate bottom-to-top (index order), so we run out of label budget
+        // at the bottom, leaving the top empty.
+        // By sorting Center-Out, we prioritize the middle of the screen.
+        const centerX = (this.transform.x * -1) + (w / 2 / this.transform.k);
+        const centerY = (this.transform.y * -1) + (h / 2 / this.transform.k);
 
-        let candidates = [];
+        // Sort copy relative to center
+        // We modify 'visibleChunks' array in place or copy?
+        // It's created new in render(), so it's safe to sort.
+        visibleChunks.sort((a, b) => {
+            const acx = (a.x1 + a.x2) / 2;
+            const acy = (a.y1 + a.y2) / 2;
+            const bcx = (b.x1 + b.x2) / 2;
+            const bcy = (b.y1 + b.y2) / 2;
 
-        if (useGrid && this.spatialIndices && visibleBuckets.length > 0) {
-            // SPATIAL LOOKUP (Iterate only visible buckets)
-            // Limit buckets if too many to prevent slow loops
-            // (If visibleBuckets is huge, we are probably not deeply zoomed, but useGrid flags handles that)
-            let count = 0;
-            for (const bucket of visibleBuckets) {
-                // Indices in spatialIndices are contiguous per bucket
-                const start = bucket.offset;
-                const end = bucket.offset + bucket.count;
-                for (let i = start; i < end; i++) {
-                    candidates.push(this.spatialIndices[i]);
-                    count++;
-                    if (count > 20000) break; // Hard limit for safety
-                }
-                if (count > 20000) break;
+            const distA = (acx - centerX) ** 2 + (acy - centerY) ** 2;
+            const distB = (bcx - centerX) ** 2 + (bcy - centerY) ** 2;
+            return distA - distB;
+        });
+
+        // Global scan limiter
+        let totalScans = 0;
+        const GLOBAL_SCAN_LIMIT = 200000;
+
+        for (const chunk of visibleChunks) {
+            if (drawn >= MAX_LABELS) break;
+            if (totalScans >= GLOBAL_SCAN_LIMIT) break;
+
+            const start = chunk.offset;
+            const end = chunk.offset + chunk.count;
+
+            const scanDepth = Math.max(100, Math.ceil(20000 * lodRatio));
+
+            let checked = 0;
+
+            for (let i = start; i < end; i++) {
+                const idx = this.sortedIndices[i];
+                checked++;
+                totalScans++;
+
+                if (checked > scanDepth) break;
+                if (totalScans > GLOBAL_SCAN_LIMIT) break;
+
+                // Project
+                const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
+                const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
+                const sx = px;
+                const sy = h - py;
+
+                // Strict bounds
+                if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
+
+                // Collision (Increased Spacing 150x40 to fix "dense clutter")
+                const gx = Math.floor(sx / 150);
+                const gy = Math.floor(sy / 40);
+                const key = `${gx},${gy}`;
+
+                if (occupied.has(key)) continue;
+
+                ctx.fillText(this.dataLabels[idx], sx, sy - 5);
+                occupied.add(key);
+                drawn++;
+                if (drawn >= MAX_LABELS) return;
             }
-            // Sort spatial candidates by size/importance roughly? 
-            // Better: just filter by importance since spatialIndices is random order
-            // Actually, spatialIndices is just position. 
-            // We need to prioritize important nodes within the visible set.
-            // Fast approach: Check standard important list against visible bounds?
-            // "candidates" here contains ALL visible points (e.g. 500 points).
-            // This is perfect. we just draw them.
-        } else {
-            // IMPORTANCE LOOKUP (Legacy)
-            // Iterate top nodes globally
-            // candidates is just an iterator simulation or we just iterate directly
-        }
-
-        const iterator = (useGrid && candidates.length > 0) ? candidates : this.labelIndices;
-        const limit = (useGrid && candidates.length > 0) ? candidates.length : this.labelIndices.length;
-
-        for (let i = 0; i < limit; i++) {
-            const idx = iterator[i];
-
-            // Screen projection
-            const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
-            const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
-
-            const sx = px;
-            const sy = h - py;
-
-            // Culling off-screen (Strict)
-            if (sx < -20 || sx > w + 20 || sy < -20 || sy > h + 20) continue;
-
-            // Text collision
-            const gx = Math.floor(sx / 100);
-            const gy = Math.floor(sy / 24);
-            const key = `${gx},${gy}`;
-
-            if (occupied.has(key)) continue;
-
-            // Draw
-            ctx.fillText(this.dataLabels[idx], sx, sy - 5);
-            occupied.add(key);
-            drawn++;
-
-            if (drawn > MAX_LABELS) break;
         }
     }
 
