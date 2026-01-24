@@ -124,6 +124,15 @@ export class GraphRenderer {
             gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
         }
 
+        // 5. GLOBAL IMPORTANCE SORT (Restored by User Request)
+        // This was the "secret sauce" of the previous version.
+        // We sort ALL nodes by size once.
+        // When zoomed out, we iterate this list. It guarantees top nodes are found.
+        this.labelIndices = new Uint32Array(this.nodeCount);
+        for (let i = 0; i < this.nodeCount; i++) this.labelIndices[i] = i;
+        this.labelIndices.sort((a, b) => data.size[b] - data.size[a]);
+
+        // --- NEW OPTIMIZATION: ADAPTIVE SORTED CHUNKS ---
         console.time("AdaptiveGrid");
 
         // A. Bounds
@@ -246,6 +255,8 @@ export class GraphRenderer {
 
         const { x: tx, y: ty, k } = this.transform;
 
+        // --- LINEAR LOD LOGIC ---
+
         // 1. Calculate World View
         const screenMinX = -w; const screenMaxX = 2 * w;
         const screenMinY = -h; const screenMaxY = 2 * h;
@@ -335,49 +346,44 @@ export class GraphRenderer {
         let drawn = 0;
         const MAX_LABELS = 400;
 
-        // FIX: Sort chunks by distance to center of screen.
-        // Currently we iterate bottom-to-top (index order), so we run out of label budget
-        // at the bottom, leaving the top empty.
-        // By sorting Center-Out, we prioritize the middle of the screen.
-        const centerX = (this.transform.x * -1) + (w / 2 / this.transform.k);
-        const centerY = (this.transform.y * -1) + (h / 2 / this.transform.k);
+        // HYBRID STRATEGY: 
+        // 1. Zoomed Out (lodRatio low): Uses Global Importance List.
+        //    Guarantees top nodes are visible everywhere. No chunk bias.
+        // 2. Zoomed In (lodRatio high): Uses Spatial Chunks.
+        //    Ensures we find local nodes in the deep structure.
 
-        // Sort copy relative to center
-        // We modify 'visibleChunks' array in place or copy?
-        // It's created new in render(), so it's safe to sort.
-        visibleChunks.sort((a, b) => {
-            const acx = (a.x1 + a.x2) / 2;
-            const acy = (a.y1 + a.y2) / 2;
-            const bcx = (b.x1 + b.x2) / 2;
-            const bcy = (b.y1 + b.y2) / 2;
+        const isZoomedIn = lodRatio > 0.15; // Threshold ~ 15% detail
 
-            const distA = (acx - centerX) ** 2 + (acy - centerY) ** 2;
-            const distB = (bcx - centerX) ** 2 + (bcy - centerY) ** 2;
-            return distA - distB;
-        });
+        if (!isZoomedIn) {
+            // --- ZOOMED OUT: STRATIFIED SAMPLING ---
+            // Instead of a blind global list (which biases to the center and can miss visible areas),
+            // we collect the top N "representative" nodes from EACH visible chunk.
+            // This ensures spatial fairness: every chunk gets a chance to show its best label.
 
-        // Global scan limiter
-        let totalScans = 0;
-        const GLOBAL_SCAN_LIMIT = 200000;
+            const candidates = [];
 
-        for (const chunk of visibleChunks) {
-            if (drawn >= MAX_LABELS) break;
-            if (totalScans >= GLOBAL_SCAN_LIMIT) break;
+            // We want roughly 5000 candidates to sort and pick from.
+            // If we have 1000 chunks, we take top 5 from each.
+            // If we have 10 chunks, we take top 500 from each.
+            const targetCandidates = 5000;
+            const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
 
-            const start = chunk.offset;
-            const end = chunk.offset + chunk.count;
+            for (const chunk of visibleChunks) {
+                // The chunk's indices are PRE-SORTED by size in setData.
+                // So the first 'count' indices are the largest nodes in that chunk.
+                const count = Math.min(chunk.count, perChunk);
+                const start = chunk.offset;
+                for (let i = 0; i < count; i++) {
+                    candidates.push(this.sortedIndices[start + i]);
+                }
+            }
 
-            const scanDepth = Math.max(100, Math.ceil(20000 * lodRatio));
+            // Sort candidates globally by importance (size)
+            candidates.sort((a, b) => this.dataSize[b] - this.dataSize[a]);
 
-            let checked = 0;
-
-            for (let i = start; i < end; i++) {
-                const idx = this.sortedIndices[i];
-                checked++;
-                totalScans++;
-
-                if (checked > scanDepth) break;
-                if (totalScans > GLOBAL_SCAN_LIMIT) break;
+            // Draw the winners
+            for (const idx of candidates) {
+                if (drawn >= MAX_LABELS) break;
 
                 // Project
                 const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
@@ -385,10 +391,10 @@ export class GraphRenderer {
                 const sx = px;
                 const sy = h - py;
 
-                // Strict bounds
+                // Simple skip if way off screen
                 if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
 
-                // Collision (Increased Spacing 150x40 to fix "dense clutter")
+                // Start Drawing (Collision Check)
                 const gx = Math.floor(sx / 150);
                 const gy = Math.floor(sy / 40);
                 const key = `${gx},${gy}`;
@@ -398,7 +404,66 @@ export class GraphRenderer {
                 ctx.fillText(this.dataLabels[idx], sx, sy - 5);
                 occupied.add(key);
                 drawn++;
-                if (drawn >= MAX_LABELS) return;
+            }
+
+        } else {
+            // --- ZOOMED IN: SPATIAL SCAN ---
+            // Iterate chunks to find local details.
+            // We remove per-chunk limits and rely on the GLOBAL safety limit.
+            // This ensures we dig deep enough to find labels even in dense chunks.
+
+            // Prioritize Center Chunks (Better UX)
+            const centerX = (this.transform.x * -1) + (w / 2 / this.transform.k);
+            const centerY = (this.transform.y * -1) + (h / 2 / this.transform.k);
+
+            visibleChunks.sort((a, b) => {
+                const acx = (a.x1 + a.x2) / 2;
+                const acy = (a.y1 + a.y2) / 2;
+                const bcx = (b.x1 + b.x2) / 2;
+                const bcy = (b.y1 + b.y2) / 2;
+                const distA = (acx - centerX) ** 2 + (acy - centerY) ** 2;
+                const distB = (bcx - centerX) ** 2 + (bcy - centerY) ** 2;
+                return distA - distB;
+            });
+
+            let totalScans = 0;
+            const GLOBAL_SCAN_LIMIT = 1000000;
+
+            // Iterate chunks
+            for (const chunk of visibleChunks) {
+                if (drawn >= MAX_LABELS) break;
+                if (totalScans >= GLOBAL_SCAN_LIMIT) break;
+
+                const start = chunk.offset;
+                const end = chunk.offset + chunk.count;
+
+                // UNLIMITED DEPTH (Governor: Global Scan Limit)
+                for (let i = start; i < end; i++) {
+                    if (drawn >= MAX_LABELS) break;
+                    if (totalScans >= GLOBAL_SCAN_LIMIT) break;
+
+                    totalScans++;
+
+                    const idx = this.sortedIndices[i];
+
+                    // Project & Collision
+                    const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
+                    const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
+                    const sx = px;
+                    const sy = h - py;
+
+                    if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
+
+                    const gx = Math.floor(sx / 150);
+                    const gy = Math.floor(sy / 40);
+                    const key = `${gx},${gy}`;
+
+                    if (occupied.has(key)) continue;
+
+                    ctx.fillText(this.dataLabels[idx], sx, sy - 5);
+                    occupied.add(key);
+                    drawn++;
+                }
             }
         }
     }
