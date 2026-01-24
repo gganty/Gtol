@@ -8,12 +8,12 @@ import pandas as pd
 # --- Configuration constants ---
 # Default visualization parameters.
 DEFAULT_PARAMS = dict(
-    x_scale=140.0,      # px per branch-length unit
-    min_level_gap=56.0, # min horizontal gap between adjacent vertical stems
-    leaf_step=400.0,    # vertical spacing between consecutive leaves
-    parent_stub=20.0,   # elbow stub length before vertical
-    tip_pad=40.0,       # extra space right of farthest leaf for markers
-    weighted_stub=40.0  # minimal horizontal stub to weighted segment
+    x_scale=140.0,      # Pixels per branch-length unit
+    min_level_gap=56.0, # Min horizontal gap between adjacent vertical stems
+    leaf_step=400.0,    # Vertical spacing between consecutive leaves
+    parent_stub=20.0,   # Elbow stub length before vertical drop
+    tip_pad=40.0,       # Extra space right of farthest leaf for markers
+    weighted_stub=40.0  # Minimal horizontal stub to weighted segment
 )
 
 # Geometry & appearance constants
@@ -33,6 +33,7 @@ COLOR_LINK: str = "#97A1A9"  # gray
 MAX_NODES: int = 100_000_000_000 # Safety limit
 
 def _log(*args: object) -> None:
+    """Prints log messages to stderr."""
     print(*args, file=sys.stderr)
 
 # --- Newick Parsing Logic ---
@@ -71,7 +72,14 @@ def _tokenize(newick: str) -> Iterable[str]:
 def parse_newick(newick: str, progress_callback: Optional[Callable[[float], None]] = None, limit: Optional[int] = None) -> Dict[str, TNode]:
     """
     Parse Newick text into a dictionary of nodes (Adjacency List).
-    Time Complexity: O(N) where N is characters in string.
+    
+    Args:
+        newick: The raw Newick string.
+        progress_callback: Optional callback for reporting progress (0.0 to 1.0).
+        limit: Optional limit on the number of nodes to parse (safety break).
+        
+    Returns:
+        Dictionary mapping node IDs to TNode objects.
     """
     nodes: Dict[str, TNode] = {}
     stack: List[Optional[str]] = []
@@ -97,7 +105,7 @@ def parse_newick(newick: str, progress_callback: Optional[Callable[[float], None
             break
 
         tokens_processed += 1
-        # Optimization: Report progress sparingly to avoid I/O slowdown
+        # Report progress sparingly to avoid I/O slowdown
         if progress_callback and (tokens_processed % 1000 == 0):
             estimated_progress = min(1.0, tokens_processed / max(1, newick_len / 10))
             if estimated_progress - last_progress_report >= 0.01:
@@ -142,14 +150,14 @@ def parse_newick(newick: str, progress_callback: Optional[Callable[[float], None
             else:
                 nodes[last].blen = L
         else:
-            # Token is a Name (Leaf name or Internal Label)
+            # Token is a Name (Leaf name or Internal label)
             clean_name = tok.strip("'\"")
             
             if last is not None:
-                # If we just closed a node (or defined a leaf), this token labels it
+                # If we've just closed a node (or defined a leaf), this token labels it
                 nodes[last].name = clean_name
             else:
-                # Create new leaf node
+                # Create a new leaf node
                 u = new_id()
                 nodes[u] = TNode(id=u, name=clean_name, parent=current_parent)
                 if current_parent is not None:
@@ -183,6 +191,7 @@ def parse_newick(newick: str, progress_callback: Optional[Callable[[float], None
 # --- Tree Traversal & Layout Utilities ---
 
 def _collect_leaves(nodes: Dict[str, TNode], u: str) -> List[str]:
+    """Iteratively collects all leaf IDs under a given node u."""
     if not nodes[u].children:
         return [u]
     
@@ -200,13 +209,14 @@ def _collect_leaves(nodes: Dict[str, TNode], u: str) -> List[str]:
     return acc
 
 def _find_root(nodes: Dict[str, TNode]) -> str:
+    """Identifies the root of the tree (node with no parent)."""
     for k, v in nodes.items():
         if v.parent is None:
             return k
     raise ValueError("No root")
 
 def _sort_children_for_no_crossing(nodes: Dict[str, TNode]) -> None:
-    """Heuristic: sort children by minimal leaf name to reduce visual edge crossings."""
+    """Sort children by minimal leaf name to reduce visual edge crossings."""
     def min_leaf_name(u: str) -> str:
         # Warning: This can be slow on massive trees.
         names = [nodes[x].name or x for x in _collect_leaves(nodes, u)]
@@ -217,7 +227,7 @@ def _sort_children_for_no_crossing(nodes: Dict[str, TNode]) -> None:
             v.children.sort(key=min_leaf_name)
 
 def compute_cumdist(nodes: Dict[str, TNode], root: Optional[str] = None) -> Dict[str, float]:
-    """BFS to compute cumulative branch length (X coordinate base)."""
+    """DFS to compute cumulative branch length (X coordinate base)."""
     if root is None:
         root = _find_root(nodes)
     dist: Dict[str, float] = {root: 0.0}
@@ -274,8 +284,12 @@ def build_display_graph(
     progress_callback: Optional[Callable[[float], None]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Converts logical Tree Nodes -> Visual Points (DataFrames).
-    Generates 'bends' (elbow connectors) for orthogonal layout.
+    Converts logical Tree Nodes into Visual Points and Links (DataFrames).
+    Calculates coordinates for all nodes and generates bend points for orthogonal connectors.
+    
+    Returns:
+        nodes_df: DataFrame containing point data (x, y, color, size, label).
+        links_df: DataFrame containing link connections (source, target, color).
     """
     def report(p: float):
         if progress_callback:
@@ -382,7 +396,7 @@ def build_display_graph(
     id_to_idx = {row["id"]: i for i, row in enumerate(pts)}
     report(0.45)
 
-    # 4. Create orthogonal edges (The "Manhattan" lines)
+    # 4. Create orthogonal edges
     EPS = 1e-6
     links_created = 0
     total_links_estimate = max(1, sum(len(v.children) for v in nodes.values()))
@@ -438,7 +452,7 @@ def build_display_graph(
     return nodes_df, links_df
 
 def read_newick_input(path_or_text: str) -> str:
-    """Helper: Reads file if path exists, else returns string as is."""
+    """Helper: Reads file if path exists, otherwise treats input as raw Newick string."""
     if os.path.exists(path_or_text):
         with open(path_or_text, "r", encoding="utf-8", errors="ignore") as f:
             return f.read().strip()
@@ -478,7 +492,5 @@ def build_graph(source: str, progress_callback: Optional[Callable[[str, float], 
         min_level_gap=DEFAULT_PARAMS["min_level_gap"],
         progress_callback=lambda p: report("layout", 25.0 + p * 0.75),
     )
-    
-
     
     return nodes_df, links_df

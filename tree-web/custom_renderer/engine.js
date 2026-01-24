@@ -1,6 +1,12 @@
 import { POINT_VS, POINT_FS, LINE_VS, LINE_FS } from './shaders.js';
 
 export class GraphRenderer {
+    /**
+     * WebGL-based renderer for massive graphs.
+     * Uses Point Sprites for nodes and Lines for edges.
+     * Implements spatial hashing and dynamic LOD for performance.
+     * @param {HTMLCanvasElement} canvas - The WebGL canvas element.
+     */
     constructor(canvas) {
         this.canvas = canvas;
         this.gl = canvas.getContext('webgl', {
@@ -11,7 +17,7 @@ export class GraphRenderer {
 
         if (!this.gl) throw new Error("WebGL not supported");
 
-        // --- Initialization of programs and variables ---
+        // Initialization of programs and variables
         this.program = this.createProgram(POINT_VS, POINT_FS);
         this.programLine = this.createProgram(LINE_VS, LINE_FS);
 
@@ -37,7 +43,7 @@ export class GraphRenderer {
         this.gl.enable(this.gl.BLEND);
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
-        // Extension for indices > 65535 (critical for large graphs)
+        // Extension for indices > 65535
         this.ext = this.gl.getExtension('OES_element_index_uint');
 
         this.ctx = null;
@@ -50,6 +56,12 @@ export class GraphRenderer {
         this.ctx = canvas.getContext('2d');
     }
 
+    /**
+     * Creates and links a WebGL program from vertex and fragment shaders.
+     * @param {string} vsSource - Vertex shader source code.
+     * @param {string} fsSource - Fragment shader source code.
+     * @returns {WebGLProgram} The linked WebGL program.
+     */
     createProgram(vsSource, fsSource) {
         const gl = this.gl;
         const vs = this.compileShader(gl.VERTEX_SHADER, vsSource);
@@ -61,6 +73,12 @@ export class GraphRenderer {
         return program;
     }
 
+    /**
+     * Compiles a single shader.
+     * @param {number} type - gl.VERTEX_SHADER or gl.FRAGMENT_SHADER.
+     * @param {string} source - Shader source code.
+     * @returns {WebGLShader} The compiled shader.
+     */
     compileShader(type, source) {
         const gl = this.gl;
         const s = gl.createShader(type);
@@ -73,6 +91,11 @@ export class GraphRenderer {
         return s;
     }
 
+    /**
+     * Uploads graph data to GPU buffers.
+     * Prepares spatial alignment and sorting for efficient rendering.
+     * @param {Object} data - Object containing typed arrays of node/link data.
+     */
     setData(data) {
         const gl = this.gl;
         this.nodeCount = data.nodeCount;
@@ -124,15 +147,14 @@ export class GraphRenderer {
             gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
         }
 
-        // 5. GLOBAL IMPORTANCE SORT (Restored by User Request)
-        // This was the "secret sauce" of the previous version.
-        // We sort ALL nodes by size once.
+        // 5. Global importance sort
+        // We sort all the nodes by size once.
         // When zoomed out, we iterate this list. It guarantees top nodes are found.
         this.labelIndices = new Uint32Array(this.nodeCount);
         for (let i = 0; i < this.nodeCount; i++) this.labelIndices[i] = i;
         this.labelIndices.sort((a, b) => data.size[b] - data.size[a]);
 
-        // --- NEW OPTIMIZATION: ADAPTIVE SORTED CHUNKS ---
+        // Adaptive sorted chunks
         console.time("AdaptiveGrid");
 
         // A. Bounds
@@ -150,7 +172,7 @@ export class GraphRenderer {
         const width = maxX - minX;
         const height = maxY - minY;
 
-        // B. Calculate Dynamic Grid Resolution based on Aspect Ratio
+        // B. Calculate dynamic grid resolution based on aspect ration
         // Target ~4096 chunks for fine-grained culling and deep zoom support.
         const TARGET_CHUNKS = 4096;
         const aspect = width / height;
@@ -209,8 +231,8 @@ export class GraphRenderer {
             };
         }
 
-        // 3. Fill Indices (Unsorted first, but grouped by chunk)
-        // We will then sort WITHIN each chunk range.
+        // 3. Fill indices (unsorted first, but grouped by chunk)
+        // We will then sort within each chunk range.
         const sortedIndices = new Uint32Array(this.nodeCount);
         const currOffsets = new Uint32Array(offsets);
 
@@ -220,8 +242,7 @@ export class GraphRenderer {
             sortedIndices[currOffsets[c]++] = i;
         }
 
-        // 4. Sort Each Chunk by Importance (Size)
-        // This is crucial for Linear LOD. The first N indices of a chunk ARE the most important.
+        // 4. Sort each chunk by importance (size)
         for (let i = 0; i < this.grid.chunks.length; i++) {
             const chunk = this.grid.chunks[i];
             if (chunk.count === 0) continue;
@@ -243,6 +264,10 @@ export class GraphRenderer {
         console.timeEnd("AdaptiveGrid");
     }
 
+    /**
+     * Main render loop.
+     * clears screen, calculates visible chunks, and issues draw calls.
+     */
     render() {
         const gl = this.gl;
         const w = this.canvas.width;
@@ -335,6 +360,15 @@ export class GraphRenderer {
         }
     }
 
+    /**
+     * Renders text labels on the 2D overlay canvas.
+     * Uses a hybrid strategy: Global importance (size) for zoomed-out views, 
+     * and spatial scanning for zoomed-in views.
+     * @param {number} w - Canvas width.
+     * @param {number} h - Canvas height.
+     * @param {Array} visibleChunks - List of currently visible grid chunks.
+     * @param {number} lodRatio - Level of Detail ratio (used to switch strategies).
+     */
     renderLabels(w, h, visibleChunks, lodRatio) {
         const ctx = this.ctx;
         ctx.clearRect(0, 0, w, h);
@@ -346,31 +380,30 @@ export class GraphRenderer {
         let drawn = 0;
         const MAX_LABELS = 400;
 
-        // HYBRID STRATEGY: 
-        // 1. Zoomed Out (lodRatio low): Uses Global Importance List.
-        //    Guarantees top nodes are visible everywhere. No chunk bias.
-        // 2. Zoomed In (lodRatio high): Uses Spatial Chunks.
+        // Hybrid strategy: 
+        // 1. Zoomed Out (lodRatio low): uses global importance list.
+        //    Guarantees top nodes are visible everywhere with no chunk bias.
+        // 2. Zoomed In (lodRatio high): uses spatial chunks.
         //    Ensures we find local nodes in the deep structure.
 
         const isZoomedIn = lodRatio > 0.15; // Threshold ~ 15% detail
 
         if (!isZoomedIn) {
-            // --- ZOOMED OUT: STRATIFIED SAMPLING ---
+            // zoomed out
             // Instead of a blind global list (which biases to the center and can miss visible areas),
-            // we collect the top N "representative" nodes from EACH visible chunk.
-            // This ensures spatial fairness: every chunk gets a chance to show its best label.
+            // we collect the top N representative nodes from each visible chunk.
+            // This ensures spatial fairness where every chunk gets a chance to show its best label.
 
             const candidates = [];
 
             // We want roughly 5000 candidates to sort and pick from.
-            // If we have 1000 chunks, we take top 5 from each.
-            // If we have 10 chunks, we take top 500 from each.
+            // E.g. if we have 1000 chunks, we take top 5 from each, if we have 10 chunks, we take top 500 from each.
             const targetCandidates = 5000;
             const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
 
             for (const chunk of visibleChunks) {
-                // The chunk's indices are PRE-SORTED by size in setData.
-                // So the first 'count' indices are the largest nodes in that chunk.
+                // The chunk's indices are pre-sorted by size in setData.
+                // So the first count indices are the largest nodes in that chunk.
                 const count = Math.min(chunk.count, perChunk);
                 const start = chunk.offset;
                 for (let i = 0; i < count; i++) {
@@ -385,7 +418,6 @@ export class GraphRenderer {
             for (const idx of candidates) {
                 if (drawn >= MAX_LABELS) break;
 
-                // Project
                 const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
                 const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
                 const sx = px;
@@ -407,12 +439,12 @@ export class GraphRenderer {
             }
 
         } else {
-            // --- ZOOMED IN: SPATIAL SCAN ---
+            // zoomed in
             // Iterate chunks to find local details.
-            // We remove per-chunk limits and rely on the GLOBAL safety limit.
+            // We remove per-chunk limits and rely on the global safety limit.
             // This ensures we dig deep enough to find labels even in dense chunks.
 
-            // Prioritize Center Chunks (Better UX)
+            // Prioritize center chunks (better UX)
             const centerX = (this.transform.x * -1) + (w / 2 / this.transform.k);
             const centerY = (this.transform.y * -1) + (h / 2 / this.transform.k);
 
@@ -437,7 +469,6 @@ export class GraphRenderer {
                 const start = chunk.offset;
                 const end = chunk.offset + chunk.count;
 
-                // UNLIMITED DEPTH (Governor: Global Scan Limit)
                 for (let i = start; i < end; i++) {
                     if (drawn >= MAX_LABELS) break;
                     if (totalScans >= GLOBAL_SCAN_LIMIT) break;
@@ -468,6 +499,13 @@ export class GraphRenderer {
         }
     }
 
+    /**
+     * Updates the camera transform (pan/zoom) and requests a new frame.
+     * @param {number} x - Translation X.
+     * @param {number} y - Translation Y.
+     * @param {number} k - Zoom scale.
+     * @param {boolean} isInteracting - Whether the user is currently dragging/zooming (for lower LOD).
+     */
     setTransform(x, y, k, isInteracting = false) {
         this.transform = { x, y, k };
         this.isInteracting = isInteracting;

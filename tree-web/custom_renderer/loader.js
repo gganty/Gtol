@@ -1,3 +1,10 @@
+/**
+ * Streams, decompresses, and parses the graph data from the server.
+ * Uses a custom JSON parser to handle massive files without OOM errors.
+ * @param {ReadableStream} readableStream - The raw GZIP stream from fetch().
+ * @param {Function} onProgress - Callback for progress updates.
+ * @returns {Promise<Object>} The parsed graph data (SoA).
+ */
 export async function loadGraphStream(readableStream, onProgress) {
     if (!readableStream) throw new Error("No stream provided");
 
@@ -85,7 +92,7 @@ export async function loadGraphStream(readableStream, onProgress) {
 
         // Process buffer while we can extract data
         while (true) {
-            // STATE 1: Look for start of nodes list "nodes":[
+            // STATE 1: Look for start of nodes list "nodes":[ (this is not an emoji)
             if (state === 'SEARCH_NODES') {
                 const idx = buffer.indexOf('"nodes":[');
                 if (idx !== -1) {
@@ -111,7 +118,7 @@ export async function loadGraphStream(readableStream, onProgress) {
                     state = (state === 'IN_NODES') ? 'SEARCH_LINKS' : 'DONE';
 
                     if (state === 'DONE') {
-                        // RETURN RESULT
+                        // Return results
                         // Trim arrays (.slice) to actual element count
                         return {
                             nodeCount, linkCount,
@@ -193,7 +200,7 @@ export async function loadGraphStream(readableStream, onProgress) {
                         }
                         continue; // Immediately look for next object
                     } else {
-                        // Closing brace not found -> object incomplete
+                        // Closing brace not found means object incomplete
                         // Break inner loop, wait for next network chunk
                         break;
                     }
@@ -207,7 +214,7 @@ export async function loadGraphStream(readableStream, onProgress) {
                         state = 'IN_LINKS';
                         continue;
                     }
-                    // If unclear — wait for data (or it's EOF)
+                    // If unclear - wait for data (or it's EOF)
                     break;
                 }
             }

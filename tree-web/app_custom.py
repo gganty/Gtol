@@ -34,17 +34,26 @@ cache_key = f"{DEFAULT_TREE_PATH}_{algo_mtime}"
 path_hash = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
 CACHE_FILE = f"graph_cache_{path_hash}.json.gz"
 
+
 @app.get("/", include_in_schema=False)
 def home():
+    """
+    Serves the main HTML page for the visualization.
+    """
     return FileResponse("custom_renderer/index.html")
 
+
 # --- Async Job System ---
-# Async Job System
 # Graph calculation can take time (seconds/minutes).
-# If done in main thread, server will freeze.
+# If done in main thread, the server will freeze.
 # We use Job Queue pattern: client starts task, gets ID, polls status.
 
+
 class Job:
+    """
+    Represents a background graph calculation job.
+    Manages state, result storage, and progress reporting via a thread-safe queue.
+    """
     def __init__(self):
         self.id = str(uuid.uuid4())
         self.created_at = time.time()
@@ -55,11 +64,18 @@ class Job:
         self.thread: Optional[threading.Thread] = None
 
     def post_progress(self, stage: str, progress: float):
+        """
+        Updates the job progress status.
+        Args:
+            stage: Current stage of the job (e.g., 'parsing', 'layout').
+            progress: Percentage complete (0.0 to 100.0).
+        """
         try:
             # put_nowait to avoid blocking worker thread if queue is full
             self.progress_queue.put_nowait({"stage": stage, "progress": progress})
         except queue.Full:
             pass
+
 
 # Global job storage (in-memory)
 JOBS: Dict[str, Job] = {}
@@ -75,7 +91,8 @@ def _cleanup_old_jobs():
 @app.post("/api/v2/graph/start")
 def start_graph_job(use_cache: bool = True):
     """
-    Starts heavy calculation process in background thread.
+    Starts the heavy graph calculation process in a background thread.
+    Returns the job ID immediately so the client can poll for progress.
     """
     _cleanup_old_jobs()
     job = Job()
@@ -103,13 +120,13 @@ def start_graph_job(use_cache: bool = True):
             def callback(stage: str, progress: float):
                 job.post_progress(stage, progress)
 
-            # --- STAGE 1: Math (CPU Bound) ---
+            # Stage 1: Math (CPU Bound)
             # Call our clean function from tree_algo
             nodes_df, links_df = build_graph(DEFAULT_TREE_PATH, progress_callback=callback)
             
             job.post_progress("optimization", 99.0)
             
-            # --- STAGE 2: Optimization for WebGL ---
+            # Stage 2: Optimization for WebGL
             # WebGL prefers numbers (Int/Float).
             # Convert string IDs ("node_A", "node_B") to indices (0, 1, 2...).
             
@@ -128,11 +145,11 @@ def start_graph_job(use_cache: bool = True):
             # Nodes now are just sequential 0..N
             nodes_df["id"] = range(len(nodes_df))
             
-            # --- STAGE 3: Streaming Serialization (IO Bound) ---
+            # Stage 3: Streaming Serialization (IO Bound)
             job.post_progress("compressing", 0.0)
             
             # Write GZIP manually to memory buffer.
-            # WHY? pandas.to_json() creates a giant string. We want to write in chunks.
+            # Why? pandas.to_json() creates a giant string. We want to write in chunks.
             buf = io.BytesIO()
             with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
                 def write(s):
@@ -160,7 +177,7 @@ def start_graph_job(use_cache: bool = True):
                     if i % 250000 == 0:
                         progress = 50.0 * (i / total_nodes)
                         job.post_progress("compressing", progress)
-                        time.sleep(0) 
+                        time.sleep(0)  # this is necessary
 
                 write('],"links":[')
                 
@@ -178,7 +195,7 @@ def start_graph_job(use_cache: bool = True):
                     if i % 250000 == 0:
                          progress = 50.0 + 50.0 * (i / total_links)
                          job.post_progress("compressing", progress)
-                         time.sleep(0)
+                         time.sleep(0)  # this is necessary
 
                 write(']}') # Close JSON
 
@@ -212,7 +229,7 @@ def start_graph_job(use_cache: bool = True):
 async def get_job_progress(job_id: str):
     """
     SSE (Server-Sent Events) endpoint.
-    Keeps connection open and sends real-time status updates.
+    Keeps connection open and sends real-time status updates to the client.
     """
     job = JOBS.get(job_id)
     if not job:
@@ -221,7 +238,7 @@ async def get_job_progress(job_id: str):
     async def event_generator():
         while True:
             try:
-                # If job done and queue empty -> signal finish and exit
+                # If job done and queue empty then signal finish and exit
                 if job.done.is_set() and job.progress_queue.empty():
                     yield f"data: {json.dumps({'stage': 'complete', 'progress': 100.0})}\n\n"
                     break
@@ -236,7 +253,7 @@ async def get_job_progress(job_id: str):
                     # If no messages but job done - exit on next iteration
                     if job.done.is_set():
                          continue
-                    # Otherwise send "keep-alive" pause
+                    # Otherwise send keep-alive pause
                     await asyncio.sleep(0.1)
             except Exception:
                 break
@@ -250,7 +267,7 @@ async def get_job_progress(job_id: str):
 @app.get("/api/v2/graph/{job_id}/result")
 def get_job_result(job_id: str):
     """
-    Returns ready binary file (gzip).
+    Returns the binary file (gzipped JSON) for a completed job.
     """
     job = JOBS.get(job_id)
     if not job: return {"error": "Job not found"}, 404
@@ -263,7 +280,7 @@ def get_job_result(job_id: str):
         media_type="application/octet-stream",
         headers={
             "Content-Disposition": "attachment; filename=graph.json.gz",
-            # Important: Do not set Content-Encoding: gzip, otherwise browser unpacks it,
+            # IMPORTANT!!!!!!: Do not set Content-Encoding: gzip, otherwise browser unpacks it,
             # and our JS loader expects compressed byte stream!
         }
     )

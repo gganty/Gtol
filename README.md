@@ -2,142 +2,90 @@
 
 ## Overview
 
-A high-performance visualization engine designed to render massive phylogenetic trees (successfully tested on up to 12+ million nodes) in the browser. Unlike standard libraries (e.g. Cosmograph) that fail with OOM (Out of Memory) on such datasets, this project implements a custom **Streaming Pipeline** and a dedicated **WebGL rendering engine** optimized for memory efficiency and 60 FPS interactivity.
+This is a high-performance visualization engine designed to render massive phylogenetic trees in the browser. It has been successfully tested on datasets with over 12 million nodes. Unlike standard libraries that often run out of memory on such large datasets, this project uses a custom streaming pipeline and a dedicated WebGL rendering engine to maintain memory efficiency and keep the interface smooth (60 FPS).
 
-## Key Features
+## Key features
 
-* **Scale:** Handles 10M+ nodes / edges.
-* **Performance:** Constant 60 FPS via Dynamic Level of Detail (LOD) and Spatial Hashing.
-* **Memory Efficiency:** Zero-copy streaming parser and Structure of Arrays (SoA) memory layout.
-* **Layout:** Orthogonal (Manhattan) layout calculated server-side.
+*   **Scale:** It can handle over 10 million nodes and edges.
+*   **Performance:** Maintains a constant 60 FPS by using dynamic level of detail and adaptive spatial hashing.
+*   **Memory efficiency:** Uses a zero-copy streaming parser and a structure of arrays memory layout to minimize overhead.
+*   **Layout:** The orthogonal layout is calculated entirely on the server.
 
 ---
 
-## Architecture Pipeline
+## Architecture pipeline
 
-The data flow is designed to minimize RAM usage at every step, moving from raw text to GPU VRAM without keeping full object trees in memory.
+The data flow is designed to minimize RAM usage at every step. It moves data from raw text on disk to GPU memory without ever keeping the full object tree in system memory.
 
 ```
 [Newick File] -> (Python Backend) -> [Gzip Stream] -> (JS Loader) -> [TypedArrays] -> (WebGL Engine)
-
 ```
 
-### 1. Backend Processing (`tree_algo.py`)
+### 1. Backend processing (`tree_algo.py`)
 
-*Responsible for parsing, layout calculation, and geometry generation.*
+This module handles parsing, layout calculation, and geometry generation.
 
-* **Parsing (Iterative Stack Machine):**
-* Uses a custom **iterative state-machine parser** instead of recursion to handle extremely deep trees without hitting Python's `RecursionError`.
-* Time Complexity: O(N).
-* *Nuance:* Explicitly handles unclosed groups and assigns branch lengths/labels to the correct nodes using a LIFO stack.
+*   **Parsing:** We use a custom iterative state-machine parser instead of recursion. This allows us to handle extremely deep trees without hitting Python's recursion limit. The complexity is linear, O(N). It explicitly handles unclosed groups and assigns branch lengths to the correct nodes using a stack.
+*   **Layout calculation:**
+    *   The X-coordinate is computed via DFS as the cumulative branch length from the root.
+    *   The Y-coordinate is determined by spacing leaves equidistantly and centering internal nodes based on the average position of their children.
+*   **Orthogonal routing:** The engine generates Manhattan-style edges by inserting synthetic bend nodes. We use a point cache to merge overlapping bends, which reduces the total number of vertices.
 
+### 2. Server & streaming API (`app_custom.py`)
 
-* **Layout Calculation:**
-* **X-Coordinate:** Computed via DFS as cumulative branch length from the root.
-* **Y-Coordinate:**
-* Leaves are spaced equidistantly (`leaf_step`).
-* Internal nodes are centered based on the mean Y-position of their children (Post-order traversal).
+This handles non-blocking execution and delivery of data to the frontend.
 
+*   **Async job queue:** Calculations run in a background thread so they don't block the main application loop. Progress is reported back to the client using Server-Sent Events.
+*   **String to integer mapping:** To save memory on the frontend, we convert string IDs (like "SARS-CoV-2...") to integer indices (0, 1, 2...) on the server.
+*   **Manual chunked gzip streaming:** Instead of creating a huge JSON string in RAM, the server manually writes JSON chunks directly into a gzip buffer. This allows us to send 500MB+ datasets with a very small memory footprint.
 
+### 3. Frontend ingestion (`loader.js`)
 
+This script is responsible for parsing the incoming data stream without crashing the browser.
 
-* **Orthogonal Routing:**
-* Generates "Manhattan-style" edges by inserting synthetic "Bend" nodes (Elbows).
-* *Optimization:* Uses a `point_cache` to merge overlapping bend points, reducing the total vertex count.
+*   **Decompression:** We use the browser's native `DecompressionStream` to unpack data on the fly.
+*   **Custom streaming JSON parser:** Standard `JSON.parse()` will crash on files of this size, so we implemented a finite state machine that reads raw bytes, decodes them, and parses one object at a time.
+*   **Memory layout:** Data is loaded directly into `Float32Array` and `Uint32Array` buffers. This avoids the overhead of JavaScript objects (which use significantly more RAM) and uses dynamic array resizing for efficient insertion.
 
+### 4. Rendering engine (`engine.js` & `shaders.js`)
 
+This component draws the millions of points at 60 frames per second.
 
-### 2. Server & Streaming API (`app_custom.py`)
-
-*Responsible for non-blocking execution and data delivery.*
-
-* **Async Job Queue:**
-* Calculations run in a background `threading.Thread` to prevent blocking the FastAPI main loop (CPU-bound task).
-* Progress is reported via **Server-Sent Events (SSE)**.
-
-
-* **String -> Integer Mapping:**
-* Converts string IDs (`"SARS-CoV-2..."`) to integer indices (`0, 1, 2...`) server-side. This drastically reduces memory usage on the frontend (Int32 vs String objects).
-
-
-* **Manual Chunked Gzip Streaming:**
-* Instead of `json.dumps()` (which builds a huge string in RAM), the server manually writes JSON chunks directly into a Gzip buffer.
-* This allows sending 500MB+ datasets with minimal server memory footprint.
-
-
-
-### 3. Frontend Ingestion (`loader.js`)
-
-*Responsible for parsing the stream without crashing the browser.*
-
-* **Decompression:** Uses the browser native `DecompressionStream('gzip')` to unpack data on the fly.
-* **Custom Streaming JSON Parser:**
-* Standard `JSON.parse()` crashes on large files.
-* This module implements a **Finite State Machine** that reads raw bytes, decodes them, and counts braces `{}` to extract and parse one object at a time.
-
-
-* **Memory Layout (Structure of Arrays):**
-* Data is loaded directly into `Float32Array` and `Uint32Array`.
-* Avoids JS Objects overhead (`{x:1, y:2}` uses much more RAM than 8 bytes in a TypedArray).
-* Implements dynamic array resizing (amortized O(1) insertion).
-
-
-
-### 4. Rendering Engine (`engine.js` & `shaders.js`)
-
-*Responsible for drawing 12M points at 60 FPS.*
-
-* **WebGL Pipeline:**
-* **Vertex Shader:** Handles coordinate transformation (Pan/Zoom) and projection to Clip Space (-1..1).
-* **Fragment Shader:** Uses **SDF (Signed Distance Fields)** to draw perfect circles with antialiasing inside point primitives.
-
-
-* **Optimization 1: Spatial Hash Grid (Culling):**
-* The world is divided into a 64x64 grid.
-* An index buffer sorts points by their grid cell.
-* During rendering, the CPU calculates which grid cells are visible (Frustum Culling) and issues draw calls *only* for those cells.
-
-
-* **Optimization 2: Dynamic LOD:**
-* **Static State:** Draws high-quality output using the Spatial Grid.
-* **Interaction State (Pan/Zoom):** Switches to "Strided Rendering" (drawing every 5th or 10th point) to maintain fluidity during heavy GPU load.
-
-
-* **Text Rendering:**
-* Uses a secondary 2D Canvas overlay.
-* Implements collision detection based on the spatial grid to prevent label overlapping.
-
-
+*   **WebGL pipeline:**
+    *   **Vertex shader:** Handles coordinate transformation (pan/zoom) and projection to the screen.
+    *   **Fragment shader:** Uses signed distance fields to draw smooth, antialiased circles for points.
+*   **Optimization 1 (Culling):** The world is divided into dynamic grid chunks. An index buffer sorts points by their cell. During rendering, the CPU calculates which cells are visible and only draws those.
+*   **Optimization 2 (LOD):**
+    *   When zoomed out, we use stratified sampling to ensure the most important nodes are visible across the map.
+    *   When zoomed in, we switch to a full spatial scan to reveal local details.
+    *   During heavy interaction (like panning or zooming), we switch to a lower level of detail to keep the frame rate high.
+*   **Text rendering:** Labels are drawn on a secondary 2D canvas overlay. We use the spatial grid to detect collisions and prevent labels from overlapping.
 
 ---
 
-## Installation & Usage
+## Installation & usage
 
-1. **Dependencies:**
-```bash
-pip install fastapi uvicorn pandas numpy
+1.  **Dependencies:**
+    ```bash
+    pip install fastapi uvicorn pandas numpy
+    ```
 
-```
+2.  **Run server:**
+    ```bash
+    uvicorn app_custom:app --reload
+    ```
 
-
-2. **Run Server:**
-```bash
-uvicorn app_custom:app --reload
-
-```
-
-
-3. **Access:**
-Open `http://127.0.0.1:8000/custom/index.html`
+3.  **Access:**
+    Open `http://127.0.0.1:8000/custom/index.html`
 
 ---
 
-## Algorithms Recap
+## Algorithms recap
 
 | Component | Algorithm / Technique | Reason |
 | --- | --- | --- |
-| **Parser** | Iterative Stack Machine | Avoid Recursion Limit / Parsing Speed |
-| **Geometry** | DFS (X) + Mean Centering (Y) | Phylogenetic standard visualization |
-| **Network** | Chunked Gzip Stream | Prevent Server OOM |
-| **Loader** | Brace-Counting Stream Parser | Prevent Browser OOM |
-| **Render** | Spatial Hashing + Frustum Culling | GPU Optimization for 10M+ points |
+| **Parser** | Iterative stack machine | Avoid recursion limit / parsing speed |
+| **Geometry** | DFS (X) + Mean centering (Y) | Standard phylogenetic visualization |
+| **Network** | Chunked gzip stream | Prevent server OOM |
+| **Loader** | Brace-counting stream parser | Prevent browser OOM |
+| **Render** | Adaptive spatial hashing + Frustum culling | GPU optimization for 10M+ points |

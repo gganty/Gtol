@@ -1,9 +1,10 @@
 /**
  * Stores shader source code (GPU programs).
  * Language: GLSL (OpenGL Shading Language).
+ * Exports vertex and fragment shaders for Points and Lines.
  */
 
-// --- VERTEX SHADER ---
+// VERTEX SHADER
 // Runs once per point.
 // Goal: Transform (x, y) coordinates to screen coordinates (-1.0 ... +1.0).
 export const POINT_VS = `
