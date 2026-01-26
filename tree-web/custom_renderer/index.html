@@ -35,21 +35,88 @@
             pointer-events: none;
         }
 
-        /* Floating control panel */
-        #ui {
+        /* Floating panels */
+        .panel {
             position: fixed;
             top: 20px;
-            left: 20px;
-            width: 280px;
+            bottom: 20px;
             z-index: 10;
+            display: flex;
+            align-items: flex-start;
+            transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+
+        .panel-content {
+            width: 280px;
             background: rgba(20, 20, 20, 0.85);
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.1);
             padding: 20px;
             border-radius: 12px;
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            box-sizing: border-box;
+            max-height: 90vh;
+            /* Prevent overflow */
+            overflow-y: auto;
         }
 
+        /* Toggle button */
+        .panel-toggle {
+            width: 30px;
+            height: 50px;
+            background: rgba(40, 40, 40, 0.9);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            padding: 0;
+            margin-top: 20px;
+            /* Align with top of panel content roughly */
+            z-index: 11;
+        }
+
+        .panel-toggle:hover {
+            background: #444;
+        }
+
+        /* Left panel */
+        #panel-left {
+            left: 20px;
+            flex-direction: row;
+            /* Content then Toggle */
+        }
+
+        #panel-left .panel-toggle {
+            border-radius: 0 8px 8px 0;
+            border-left: none;
+        }
+
+        #panel-left.collapsed {
+            transform: translateX(-280px);
+            /* Hide content */
+        }
+
+        /* Right panel */
+        #panel-right {
+            right: 20px;
+            flex-direction: row;
+            /* Toggle then Content */
+        }
+
+        #panel-right .panel-toggle {
+            border-radius: 8px 0 0 8px;
+            border-right: none;
+        }
+
+        #panel-right.collapsed {
+            transform: translateX(280px);
+        }
+
+
+        /* Existing styles adapted */
         button {
             width: 100%;
             padding: 10px;
@@ -114,25 +181,40 @@
 </head>
 
 <body>
-    <div id="ui">
-        <h3>Tree Viewer</h3>
-        <div id="status">Ready</div>
+    <!-- Left panel: Main controls -->
+    <div id="panel-left" class="panel">
+        <div class="panel-content">
+            <h3>Tree Viewer</h3>
+            <div id="status">Ready</div>
 
-        <div class="section">
-            <span class="label">Server Compute</span>
-            <input type="file" id="compute-file-input" accept=".nwk,.tre,.tree"
-                style="width:100%; margin-top:5px; color:#aaa;">
-            <button id="btn-compute">Compute Graph</button>
+            <div class="section">
+                <span class="label">Server Compute</span>
+                <input type="file" id="compute-file-input" accept=".nwk,.tre,.tree"
+                    style="width:100%; margin-top:5px; color:#aaa;">
+                <button id="btn-compute">Compute Graph</button>
+            </div>
+
+            <div class="section">
+                <span class="label">Local Visualization</span>
+                <input type="file" id="file-input" accept=".gz,.json" style="width:100%; margin-top:5px; color:#aaa;">
+                <button id="btn-load-file">Render File</button>
+            </div>
+
+            <div id="progress-container">
+                <div id="progress-bar"></div>
+            </div>
         </div>
+        <button class="panel-toggle" id="toggle-left">&larr;</button>
+    </div>
 
-        <div class="section">
-            <span class="label">Local Visualization</span>
-            <input type="file" id="file-input" accept=".gz,.json" style="width:100%; margin-top:5px; color:#aaa;">
-            <button id="btn-load-file">Render File</button>
-        </div>
-
-        <div id="progress-container">
-            <div id="progress-bar"></div>
+    <!-- Right panel: Future controls -->
+    <div id="panel-right" class="panel collapsed">
+        <button class="panel-toggle" id="toggle-right">&larr;</button>
+        <div class="panel-content">
+            <h3>Controls</h3>
+            <p style="color:#888; font-size:13px; font-style:italic;">
+                Additional visualization settings will appear here.
+            </p>
         </div>
     </div>
 
@@ -300,7 +382,25 @@
             transform = { x: tx, y: ty, k: k };
         }
 
-        // --- INTERACTION (Mouse & Wheel) ---
+        // --- UI panels ---
+        const panelLeft = document.getElementById('panel-left');
+        const toggleLeft = document.getElementById('toggle-left');
+        const panelRight = document.getElementById('panel-right');
+        const toggleRight = document.getElementById('toggle-right');
+
+        toggleLeft.addEventListener('click', () => {
+            panelLeft.classList.toggle('collapsed');
+            const isCollapsed = panelLeft.classList.contains('collapsed');
+            toggleLeft.innerHTML = isCollapsed ? '&rarr;' : '&larr;';
+        });
+
+        toggleRight.addEventListener('click', () => {
+            panelRight.classList.toggle('collapsed');
+            const isCollapsed = panelRight.classList.contains('collapsed');
+            toggleRight.innerHTML = isCollapsed ? '&larr;' : '&rarr;';
+        });
+
+        // --- Interaction (mouse & wheel) ---
 
         canvas.addEventListener('mousedown', e => {
             isDragging = true;
