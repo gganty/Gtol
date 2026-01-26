@@ -104,6 +104,10 @@
             right: 20px;
             flex-direction: row;
             /* Toggle then Content */
+            display: none;
+            /* Hidden by default until render */
+            opacity: 0;
+            transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 1s ease-out;
         }
 
         #panel-right .panel-toggle {
@@ -131,6 +135,18 @@
 
         button:active {
             transform: scale(0.98);
+        }
+
+        .btn-control {
+            width: auto;
+            padding: 8px 12px;
+            margin: 0;
+            background: #333;
+            color: #eee;
+        }
+
+        .btn-control:hover {
+            background: #444;
         }
 
         #btn-compute {
@@ -207,14 +223,22 @@
         <button class="panel-toggle" id="toggle-left">&larr;</button>
     </div>
 
-    <!-- Right panel: Future controls -->
+    <!-- Right panel: controls -->
     <div id="panel-right" class="panel collapsed">
         <button class="panel-toggle" id="toggle-right">&larr;</button>
         <div class="panel-content">
             <h3>Controls</h3>
-            <p style="color:#888; font-size:13px; font-style:italic;">
-                Additional visualization settings will appear here.
-            </p>
+
+            <div class="section">
+                <span class="label">Camera</span>
+                <div style="display: flex; gap: 5px; margin-top: 5px;">
+                    <button id="btn-zoom-in" class="btn-control">+</button>
+                    <button id="btn-zoom-out" class="btn-control">-</button>
+                    <button id="btn-reset-cam" class="btn-control" style="flex-grow: 2;">Reset</button>
+                </div>
+            </div>
+
+            <!-- Future controls can go here -->
         </div>
     </div>
 
@@ -231,6 +255,7 @@
 
         let transform = { x: 0, y: 0, k: 0.1 }; // Start zoomed out
         let renderer;
+        let currentData = null; // Store for reset
         let isDragging = false;
         let lastX = 0, lastY = 0;
 
@@ -344,6 +369,19 @@
             progressEl.style.width = '100%';
 
             renderer.setData(data);
+            currentData = data;
+            fitToScreen(data);
+
+            // Show controls panel with fade-in animation
+            const pRight = document.getElementById('panel-right');
+            pRight.style.display = 'flex';
+            // Force reflow
+            void pRight.offsetWidth;
+            pRight.style.opacity = '1';
+        }
+
+        function fitToScreen(data) {
+            if (!data || !renderer) return;
 
             // Auto-Fit (Center Camera)
             let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -368,18 +406,48 @@
             const kH = canvas.height / treeH;
 
             // Choose smaller scale to fit both dimensions
-            // Handle case where treeW or treeH is very small (avoid infinity)
             const k = Math.min(kW || 1, kH || 1) * padding;
 
             // Center:
             // CanvasCenter = (WorldCenter + tx) * k
             // tx = CanvasCenter/k - WorldCenter
             const tx = (canvas.width / 2) / k - centerX;
-
             const ty = (canvas.height / 2) / k - centerY;
 
             renderer.setTransform(tx, ty, k);
             transform = { x: tx, y: ty, k: k };
+        }
+
+        // --- Camera Controls ---
+        document.getElementById('btn-reset-cam').addEventListener('click', () => {
+            if (currentData) fitToScreen(currentData);
+        });
+
+        document.getElementById('btn-zoom-in').addEventListener('click', () => {
+            applyZoom(1.2);
+        });
+
+        document.getElementById('btn-zoom-out').addEventListener('click', () => {
+            applyZoom(1 / 1.2);
+        });
+
+        function applyZoom(factor) {
+            if (!renderer) return;
+            // Zoom towards center of screen
+            const mx = canvas.width / 2;
+            const my = canvas.height / 2;
+
+            // Logic similar to wheel
+            // WorldX = (ScreenX / k) - tx
+            const wx_before = mx / transform.k - transform.x;
+            const wy_before = my / transform.k - transform.y;
+
+            transform.k *= factor;
+
+            transform.x = mx / transform.k - wx_before;
+            transform.y = my / transform.k - wy_before;
+
+            renderer.setTransform(transform.x, transform.y, transform.k, false);
         }
 
         // --- UI panels ---
