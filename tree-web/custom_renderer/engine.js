@@ -96,169 +96,238 @@ export class GraphRenderer {
      * Prepares spatial alignment and sorting for efficient rendering.
      * @param {Object} data - Object containing typed arrays of node/link data.
      */
+    /**
+     * Uploads graph data to GPU buffers.
+     * Prepares spatial alignment and sorting for efficient rendering.
+     * @param {Object} data - Object containing typed arrays of node/link data.
+     */
     setData(data) {
         const gl = this.gl;
         this.nodeCount = data.nodeCount;
         this.linkCount = data.linkCount;
 
-        // Save references for Labels
+        // Save references for labels (original order)
         this.dataX = data.x;
         this.dataY = data.y;
         this.dataLabels = data.labels;
         this.dataSize = data.size;
 
-        // 1. Positions
-        const posData = new Float32Array(this.nodeCount * 2);
-        for (let i = 0; i < this.nodeCount; i++) {
-            posData[i * 2] = data.x[i];
-            posData[i * 2 + 1] = data.y[i];
-        }
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
-        gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
-
-        // 2. Sizes
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufSize);
-        gl.bufferData(gl.ARRAY_BUFFER, data.size, gl.STATIC_DRAW);
-
-        // 3. Colors
-        const colData = new Float32Array(this.nodeCount * 3);
-        for (let i = 0; i < this.nodeCount; i++) {
-            colData[i * 3] = data.r[i];
-            colData[i * 3 + 1] = data.g[i];
-            colData[i * 3 + 2] = data.b[i];
-        }
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufColor);
-        gl.bufferData(gl.ARRAY_BUFFER, colData, gl.STATIC_DRAW);
-
-        // 4. Links
-        if (data.linkCount > 0) {
-            const linkPos = new Float32Array(data.linkCount * 4);
-            let ptr = 0;
-            for (let i = 0; i < data.linkCount; i++) {
-                const s = data.linkSrc[i];
-                const t = data.linkTgt[i];
-                linkPos[ptr++] = data.x[s];
-                linkPos[ptr++] = data.y[s];
-                linkPos[ptr++] = data.x[t];
-                linkPos[ptr++] = data.y[t];
-            }
-            this.bufLinkPos = gl.createBuffer();
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufLinkPos);
-            gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
-        }
-
-        // 5. Global importance sort
-        // We sort all the nodes by size once.
-        // When zoomed out, we iterate this list. It guarantees top nodes are found.
-        this.labelIndices = new Uint32Array(this.nodeCount);
-        for (let i = 0; i < this.nodeCount; i++) this.labelIndices[i] = i;
-        this.labelIndices.sort((a, b) => data.size[b] - data.size[a]);
-
-        // Adaptive sorted chunks
-        console.time("AdaptiveGrid");
-
-        // A. Bounds
+        // 1. Calculate bounds & center
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (let i = 0; i < this.nodeCount; i++) {
             const x = data.x[i]; const y = data.y[i];
             if (x < minX) minX = x; if (x > maxX) maxX = x;
             if (y < minY) minY = y; if (y > maxY) maxY = y;
         }
-        // Small padding
+
+        // Padding & Center
         const padX = (maxX - minX) * 0.01;
         const padY = (maxY - minY) * 0.01;
-        minX -= padX; maxX += padX; minY -= padY; maxY += padY;
+        this.minX = minX - padX;
+        this.maxX = maxX + padX;
+        this.minY = minY - padY;
+        this.maxY = maxY + padY;
 
-        const width = maxX - minX;
-        const height = maxY - minY;
+        this.centerX = (this.minX + this.maxX) / 2;
+        this.centerY = (this.minY + this.maxY) / 2;
 
-        // B. Calculate dynamic grid resolution based on aspect ration
-        // Target ~4096 chunks for fine-grained culling and deep zoom support.
+        const width = this.maxX - this.minX;
+        const height = this.maxY - this.minY;
+
+        // 2. Setup grid
+        console.time("AdaptiveGrid");
         const TARGET_CHUNKS = 4096;
         const aspect = width / height;
 
-        // cols * rows = TARGET
-        // cols / rows = aspect -> cols = rows * aspect
-        // rows * aspect * rows = TARGET -> rows^2 = TARGET / aspect
         let nRows = Math.sqrt(TARGET_CHUNKS / aspect);
         let nCols = nRows * aspect;
 
-        // Clamp & Integerize
-        if (nRows < 1) nRows = 1;
-        if (nCols < 1) nCols = 1;
-        nRows = Math.ceil(nRows);
-        nCols = Math.ceil(nCols);
+        if (nRows < 1) nRows = 1; if (nCols < 1) nCols = 1;
+        nRows = Math.ceil(nRows); nCols = Math.ceil(nCols);
 
         this.grid = {
-            minX, maxX, minY, maxY, width, height,
+            minX: this.minX, maxX: this.maxX, minY: this.minY, maxY: this.maxY, width, height,
             nCols, nRows,
             chunks: new Array(nCols * nRows)
         };
 
-        // C. Assign Nodes to Chunks
         // Helpers
         const getChunkIdx = (x, y) => {
-            let cx = Math.floor(((x - minX) / width) * nCols);
-            let cy = Math.floor(((y - minY) / height) * nRows);
+            let cx = Math.floor(((x - this.minX) / width) * nCols);
+            let cy = Math.floor(((y - this.minY) / height) * nRows);
             if (cx >= nCols) cx = nCols - 1; if (cx < 0) cx = 0;
             if (cy >= nRows) cy = nRows - 1; if (cy < 0) cy = 0;
             return cy * nCols + cx;
         };
 
-        // 1. Count
+        // 3. Count
         const counts = new Uint32Array(nCols * nRows);
         for (let i = 0; i < this.nodeCount; i++) {
             counts[getChunkIdx(data.x[i], data.y[i])]++;
         }
 
-        // 2. Offsets (for temporary sorting bucket)
+        // 4. Initialize chunks
         const offsets = new Uint32Array(nCols * nRows);
         let accum = 0;
         for (let i = 0; i < counts.length; i++) {
             offsets[i] = accum;
-            accum += counts[i];
 
-            // Init chunk metadata
+            // Chunk bounds
+            const cx = i % nCols;
+            const cy = Math.floor(i / nCols);
+
+            const chunkX1 = this.minX + cx * (width / nCols);
+            const chunkY1 = this.minY + cy * (height / nRows);
+
             this.grid.chunks[i] = {
                 id: i,
-                offset: offsets[i], // Offset in the sorted index buffer
+                startIndex: accum, // Index in the GPU arrays
                 count: counts[i],
-                // Store spatial bounds of chunk for culling
-                x1: minX + (i % nCols) * (width / nCols),
-                x2: minX + (i % nCols + 1) * (width / nCols),
-                y1: minY + Math.floor(i / nCols) * (height / nRows),
-                y2: minY + Math.floor(i / nCols + 1) * (height / nRows)
+                x1: chunkX1,
+                y1: chunkY1,
+                x2: this.minX + (cx + 1) * (width / nCols),
+                y2: chunkY1 + (height / nRows),
+
+                // Edge Bounding Box (initially invalid)
+                linkMinX: Infinity,
+                linkMaxX: -Infinity,
+                linkMinY: Infinity,
+                linkMaxY: -Infinity,
+                linkCount: 0,
+                linkStartIndex: 0
             };
+
+            accum += counts[i];
         }
 
-        // 3. Fill indices (unsorted first, but grouped by chunk)
-        // We will then sort within each chunk range.
+        // 5. Sort indices
         const sortedIndices = new Uint32Array(this.nodeCount);
         const currOffsets = new Uint32Array(offsets);
 
-        // Pre-fill grouping
         for (let i = 0; i < this.nodeCount; i++) {
             const c = getChunkIdx(data.x[i], data.y[i]);
             sortedIndices[currOffsets[c]++] = i;
         }
 
-        // 4. Sort each chunk by importance (size)
-        for (let i = 0; i < this.grid.chunks.length; i++) {
-            const chunk = this.grid.chunks[i];
+        // 6. Sort chunks by size
+        for (const chunk of this.grid.chunks) {
             if (chunk.count === 0) continue;
-
-            const start = chunk.offset;
-            const end = chunk.offset + chunk.count;
-
-            // Subarray view
+            const start = chunk.startIndex;
+            const end = chunk.startIndex + chunk.count;
             const sub = sortedIndices.subarray(start, end);
             sub.sort((a, b) => data.size[b] - data.size[a]);
         }
 
-        // Upload to Index Buffer
-        this.bufSpatial = this.gl.createBuffer();
-        this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
-        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, sortedIndices, this.gl.STATIC_DRAW);
+        // --- Process edges ---
+        if (this.linkCount > 0) {
+            // A. Count edges per chunk
+            // We use the SOURCE node to determine which chunk "owns" the edge.
+            const linkCounts = new Uint32Array(nCols * nRows);
+            for (let i = 0; i < this.linkCount; i++) {
+                const s = data.linkSrc[i];
+                // Lookup chunk of source node
+                linkCounts[getChunkIdx(data.x[s], data.y[s])]++;
+            }
+
+            // B. Calculate offsets for links
+            const linkOffsets = new Uint32Array(nCols * nRows);
+            let linkAccum = 0;
+            for (let i = 0; i < linkCounts.length; i++) {
+                linkOffsets[i] = linkAccum;
+
+                // Store metadata in chunk
+                if (this.grid.chunks[i]) {
+                    this.grid.chunks[i].linkStartIndex = linkAccum;
+                    this.grid.chunks[i].linkCount = linkCounts[i];
+                }
+
+                linkAccum += linkCounts[i];
+            }
+
+            // C. Sort links
+            this.bufLinkPos = gl.createBuffer();
+            const linkPos = new Float32Array(this.linkCount * 4);
+            const currLinkOffsets = new Uint32Array(linkOffsets);
+
+            for (let i = 0; i < this.linkCount; i++) {
+                const s = data.linkSrc[i];
+                const t = data.linkTgt[i];
+
+                // Identify Chunk
+                const sx = data.x[s];
+                const sy = data.y[s];
+                const tx = data.x[t];
+                const ty = data.y[t];
+
+                const cIdx = getChunkIdx(sx, sy);
+                const chunk = this.grid.chunks[cIdx];
+
+                // Destination Index in Sorted Buffer
+                const ptr = currLinkOffsets[cIdx]++;
+                const offset = ptr * 4;
+
+                // Store relative to chunk origin
+                // x1, y1 (Source)
+                linkPos[offset] = sx - chunk.x1;
+                linkPos[offset + 1] = sy - chunk.y1;
+
+                // x2, y2 (Target)
+                linkPos[offset + 2] = tx - chunk.x1;
+                linkPos[offset + 3] = ty - chunk.y1;
+
+                // Update Chunk Edge Bounds (Include both Source and Target)
+                if (sx < chunk.linkMinX) chunk.linkMinX = sx;
+                if (sx > chunk.linkMaxX) chunk.linkMaxX = sx;
+                if (sy < chunk.linkMinY) chunk.linkMinY = sy;
+                if (sy > chunk.linkMaxY) chunk.linkMaxY = sy;
+
+                if (tx < chunk.linkMinX) chunk.linkMinX = tx;
+                if (tx > chunk.linkMaxX) chunk.linkMaxX = tx;
+                if (ty < chunk.linkMinY) chunk.linkMinY = ty;
+                if (ty > chunk.linkMaxY) chunk.linkMaxY = ty;
+            }
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufLinkPos);
+            gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
+        }
+
+        // 7. Generate GPU buffers for nodes
+        // We recreate data arrays in the sorted order.
+        const posData = new Float32Array(this.nodeCount * 2);
+        const colData = new Float32Array(this.nodeCount * 3);
+        const sizeData = new Float32Array(this.nodeCount); // bufSize
+
+        for (let i = 0; i < this.nodeCount; i++) {
+            const originalIdx = sortedIndices[i];
+
+            // Optimized lookup
+            const ox = data.x[originalIdx];
+            const oy = data.y[originalIdx];
+
+            const cIdx = getChunkIdx(ox, oy);
+            const chunk = this.grid.chunks[cIdx];
+
+            // Chunk relative position
+            // pos = absolute - chunkOrigin
+            posData[i * 2] = ox - chunk.x1;
+            posData[i * 2 + 1] = oy - chunk.y1;
+
+            // Copy other props
+            sizeData[i] = data.size[originalIdx];
+            colData[i * 3] = data.r[originalIdx];
+            colData[i * 3 + 1] = data.g[originalIdx];
+            colData[i * 3 + 2] = data.b[originalIdx];
+        }
+
+        // Upload Points
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
+        gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufSize);
+        gl.bufferData(gl.ARRAY_BUFFER, sizeData, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.bufColor);
+        gl.bufferData(gl.ARRAY_BUFFER, colData, gl.STATIC_DRAW);
 
         this.sortedIndices = sortedIndices; // Expose for Labels
         console.timeEnd("AdaptiveGrid");
@@ -273,16 +342,20 @@ export class GraphRenderer {
         const w = this.canvas.width;
         const h = this.canvas.height;
         gl.viewport(0, 0, w, h);
-        gl.clearColor(0.04, 0.06, 0.08, 1.0);
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
         if (!this.grid) return; // Not loaded
 
         const { x: tx, y: ty, k } = this.transform;
 
-        // --- LINEAR LOD LOGIC ---
+        // Offset transform by graph center since GPU buffers are centered
+        const glTx = tx + (this.centerX || 0);
+        const glTy = ty + (this.centerY || 0);
 
-        // 1. Calculate World View
+        // --- LOD logic ---
+
+        // 1. World view
         const screenMinX = -w; const screenMaxX = 2 * w;
         const screenMinY = -h; const screenMaxY = 2 * h;
 
@@ -291,22 +364,41 @@ export class GraphRenderer {
         const worldMinY = (h - screenMaxY) / k - ty;
         const worldMaxY = (h - screenMinY) / k - ty;
 
-        // 2. Determine Visible Chunks
-        const visibleChunks = [];
+        // 2. Visible chunks
+        const visibleNodeChunks = [];
+        const visibleLinkChunks = [];
+
         let potentialPoints = 0;
 
         for (const chunk of this.grid.chunks) {
-            if (chunk.count === 0) continue;
-            if (chunk.x2 < worldMinX || chunk.x1 > worldMaxX ||
-                chunk.y2 < worldMinY || chunk.y1 > worldMaxY) {
-                continue;
+            // A. Check node visibility
+            let isNodeVisible = false;
+
+            if (chunk.count > 0 &&
+                !(chunk.x2 < worldMinX || chunk.x1 > worldMaxX ||
+                    chunk.y2 < worldMinY || chunk.y1 > worldMaxY)) {
+
+                visibleNodeChunks.push(chunk);
+                potentialPoints += chunk.count;
+                isNodeVisible = true;
             }
-            visibleChunks.push(chunk);
-            potentialPoints += chunk.count;
+
+            // B. Check link visibility
+            if (chunk.linkCount > 0) {
+                if (isNodeVisible) {
+                    visibleLinkChunks.push(chunk);
+                } else {
+                    // Extended check
+                    if (!(chunk.linkMaxX < worldMinX || chunk.linkMinX > worldMaxX ||
+                        chunk.linkMaxY < worldMinY || chunk.linkMinY > worldMaxY)) {
+                        visibleLinkChunks.push(chunk);
+                    }
+                }
+            }
         }
 
-        // 3. Dynamic Draw Count Calculation
-        const MAX_VERTS = 1000000; // Global Budget
+        // 3. Draw count
+        const MAX_VERTS = 1000000; // budget
 
         let lodRatio = 1.0;
         if (potentialPoints > MAX_VERTS) {
@@ -314,23 +406,35 @@ export class GraphRenderer {
         }
 
         // 4. Draw
-        // Links
+
+        // Pass 1: Lines
         if (potentialPoints < 500000 && this.bufLinkPos) {
             gl.useProgram(this.programLine);
             gl.uniform2f(this.locLineRes, w, h);
-            gl.uniform3f(this.locLineTrans, tx, ty, k);
+
             gl.bindBuffer(gl.ARRAY_BUFFER, this.bufLinkPos);
             gl.vertexAttribPointer(this.locLinePos, 2, gl.FLOAT, false, 0, 0);
             gl.enableVertexAttribArray(this.locLinePos);
-            gl.drawArrays(gl.LINES, 0, this.linkCount * 2);
+
+            for (const chunk of visibleLinkChunks) {
+                if (!chunk.linkCount) continue;
+
+                // Chunk Relative Translation for Lines
+                // (Using same chunk origin as points)
+                const chunkTx = tx + chunk.x1;
+                const chunkTy = ty + chunk.y1;
+
+                gl.uniform3f(this.locLineTrans, chunkTx, chunkTy, k);
+                gl.drawArrays(gl.LINES, chunk.linkStartIndex * 2, chunk.linkCount * 2);
+            }
         }
 
-        // Points
+        // Pass 2: Points
         gl.useProgram(this.program);
         gl.uniform2f(this.locRes, w, h);
-        gl.uniform3f(this.locTrans, tx, ty, k);
         gl.uniform1i(this.locIsLine, 0);
 
+        // Bind buffers
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
         gl.vertexAttribPointer(this.locPos, 2, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locPos);
@@ -343,20 +447,27 @@ export class GraphRenderer {
         gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locColor);
 
-        // Bind Sorted Index Buffer
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.bufSpatial);
+        // We use drawArrays, no index buffer needed for points now
 
-        for (const chunk of visibleChunks) {
+        for (const chunk of visibleNodeChunks) {
             const drawCount = Math.ceil(chunk.count * lodRatio);
-
             if (drawCount > 0) {
-                gl.drawElements(gl.POINTS, drawCount, gl.UNSIGNED_INT, chunk.offset * 4);
+                // Chunk relative translation
+                // ScreenPos = (LocalX + ChunkX + transX) * k
+
+                const chunkTx = tx + chunk.x1;
+                const chunkTy = ty + chunk.y1;
+
+                gl.uniform3f(this.locTrans, chunkTx, chunkTy, k);
+
+                // Draw range from sorted buffers
+                gl.drawArrays(gl.POINTS, chunk.startIndex, drawCount);
             }
         }
 
         // 5. Labels
         if (this.ctx) {
-            this.renderLabels(w, h, visibleChunks, lodRatio);
+            this.renderLabels(w, h, visibleNodeChunks, lodRatio);
         }
     }
 
@@ -376,126 +487,56 @@ export class GraphRenderer {
         ctx.font = "500 10px sans-serif";
         ctx.textAlign = "center";
 
+        if (!this.sortedIndices) return;
+
         const occupied = new Set();
         let drawn = 0;
         const MAX_LABELS = 400;
 
-        // Hybrid strategy: 
-        // 1. Zoomed Out (lodRatio low): uses global importance list.
-        //    Guarantees top nodes are visible everywhere with no chunk bias.
-        // 2. Zoomed In (lodRatio high): uses spatial chunks.
-        //    Ensures we find local nodes in the deep structure.
+        // Candidate collection
+        const candidates = [];
 
-        const isZoomedIn = lodRatio > 0.15; // Threshold ~ 15% detail
+        // Target sorting pool
+        const targetCandidates = 2000;
+        const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
 
-        if (!isZoomedIn) {
-            // zoomed out
-            // Instead of a blind global list (which biases to the center and can miss visible areas),
-            // we collect the top N representative nodes from each visible chunk.
-            // This ensures spatial fairness where every chunk gets a chance to show its best label.
+        for (const chunk of visibleChunks) {
+            // chunk.indices are already sorted by size
+            const count = Math.min(chunk.count, perChunk);
+            const start = chunk.startIndex;
+            const end = chunk.startIndex + chunk.count;
 
-            const candidates = [];
-
-            // We want roughly 5000 candidates to sort and pick from.
-            // E.g. if we have 1000 chunks, we take top 5 from each, if we have 10 chunks, we take top 500 from each.
-            const targetCandidates = 5000;
-            const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
-
-            for (const chunk of visibleChunks) {
-                // The chunk's indices are pre-sorted by size in setData.
-                // So the first count indices are the largest nodes in that chunk.
-                const count = Math.min(chunk.count, perChunk);
-                const start = chunk.offset;
-                for (let i = 0; i < count; i++) {
-                    candidates.push(this.sortedIndices[start + i]);
-                }
+            // Collect top 'count' nodes
+            for (let i = start; i < end && i < start + count; i++) {
+                candidates.push(this.sortedIndices[i]);
             }
+        }
 
-            // Sort candidates globally by importance (size)
-            candidates.sort((a, b) => this.dataSize[b] - this.dataSize[a]);
+        // Sort candidates globally by size
+        candidates.sort((a, b) => this.dataSize[b] - this.dataSize[a]);
 
-            // Draw the winners
-            for (const idx of candidates) {
-                if (drawn >= MAX_LABELS) break;
+        // Draw
+        for (const idx of candidates) {
+            if (drawn >= MAX_LABELS) break;
 
-                const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
-                const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
-                const sx = px;
-                const sy = h - py;
+            const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
+            const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
+            const sx = px;
+            const sy = h - py;
 
-                // Simple skip if way off screen
-                if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
+            // Simple skip if way off screen
+            // Use larger margin to prevent pop-in at edges
+            if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) continue;
 
-                // Start Drawing (Collision Check)
-                const gx = Math.floor(sx / 150);
-                const gy = Math.floor(sy / 40);
-                const key = `${gx},${gy}`;
+            const gx = Math.floor(sx / 150);
+            const gy = Math.floor(sy / 40);
+            const key = `${gx},${gy}`;
 
-                if (occupied.has(key)) continue;
+            if (occupied.has(key)) continue;
 
-                ctx.fillText(this.dataLabels[idx], sx, sy - 5);
-                occupied.add(key);
-                drawn++;
-            }
-
-        } else {
-            // zoomed in
-            // Iterate chunks to find local details.
-            // We remove per-chunk limits and rely on the global safety limit.
-            // This ensures we dig deep enough to find labels even in dense chunks.
-
-            // Prioritize center chunks (better UX)
-            const centerX = (this.transform.x * -1) + (w / 2 / this.transform.k);
-            const centerY = (this.transform.y * -1) + (h / 2 / this.transform.k);
-
-            visibleChunks.sort((a, b) => {
-                const acx = (a.x1 + a.x2) / 2;
-                const acy = (a.y1 + a.y2) / 2;
-                const bcx = (b.x1 + b.x2) / 2;
-                const bcy = (b.y1 + b.y2) / 2;
-                const distA = (acx - centerX) ** 2 + (acy - centerY) ** 2;
-                const distB = (bcx - centerX) ** 2 + (bcy - centerY) ** 2;
-                return distA - distB;
-            });
-
-            let totalScans = 0;
-            const GLOBAL_SCAN_LIMIT = 1000000;
-
-            // Iterate chunks
-            for (const chunk of visibleChunks) {
-                if (drawn >= MAX_LABELS) break;
-                if (totalScans >= GLOBAL_SCAN_LIMIT) break;
-
-                const start = chunk.offset;
-                const end = chunk.offset + chunk.count;
-
-                for (let i = start; i < end; i++) {
-                    if (drawn >= MAX_LABELS) break;
-                    if (totalScans >= GLOBAL_SCAN_LIMIT) break;
-
-                    totalScans++;
-
-                    const idx = this.sortedIndices[i];
-
-                    // Project & Collision
-                    const px = (this.dataX[idx] + this.transform.x) * this.transform.k;
-                    const py = (this.dataY[idx] + this.transform.y) * this.transform.k;
-                    const sx = px;
-                    const sy = h - py;
-
-                    if (sx < -10 || sx > w + 10 || sy < -10 || sy > h + 10) continue;
-
-                    const gx = Math.floor(sx / 150);
-                    const gy = Math.floor(sy / 40);
-                    const key = `${gx},${gy}`;
-
-                    if (occupied.has(key)) continue;
-
-                    ctx.fillText(this.dataLabels[idx], sx, sy - 5);
-                    occupied.add(key);
-                    drawn++;
-                }
-            }
+            ctx.fillText(this.dataLabels[idx], sx, sy - 5);
+            occupied.add(key);
+            drawn++;
         }
     }
 

@@ -27,8 +27,7 @@ app.mount("/custom", StaticFiles(directory="custom_renderer"), name="custom")
 # DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/Chond 10Cal 10k TreeSet.tre"
 DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/UShER SARS-CoV-2 latest.nwk"
 
-# Generate cache filename based on the source path AND code modification time
-# This ensures that if we change tree_algo.py, we don't load a stale "bad" tree from cache.
+# Generate cache filename based on the source path and mtime
 algo_mtime = os.path.getmtime("tree_algo.py")
 cache_key = f"{DEFAULT_TREE_PATH}_{algo_mtime}"
 path_hash = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
@@ -43,10 +42,7 @@ def home():
     return FileResponse("custom_renderer/index.html")
 
 
-# --- Async Job System ---
-# Graph calculation can take time (seconds/minutes).
-# If done in main thread, the server will freeze.
-# We use Job Queue pattern: client starts task, gets ID, polls status.
+# --- Async jobs ---
 
 
 class Job:
@@ -98,7 +94,7 @@ def start_graph_job(use_cache: bool = True):
     job = Job()
     JOBS[job.id] = job
 
-    # 1. Cache Check (Fast Path)
+    # 1. Cache check
     print(f"[DEBUG] Request to start job. Configured Path: {DEFAULT_TREE_PATH}")
     print(f"[DEBUG] Target Cache File: {CACHE_FILE}")
     
@@ -121,14 +117,12 @@ def start_graph_job(use_cache: bool = True):
                 job.post_progress(stage, progress)
 
             # Stage 1: Math (CPU Bound)
-            # Call our clean function from tree_algo
+            # Call our function from tree_algo
             nodes_df, links_df = build_graph(DEFAULT_TREE_PATH, progress_callback=callback)
             
             job.post_progress("optimization", 99.0)
             
             # Stage 2: Optimization for WebGL
-            # WebGL prefers numbers (Int/Float).
-            # Convert string IDs ("node_A", "node_B") to indices (0, 1, 2...).
             
             if "id" not in nodes_df.columns:
                 nodes_df["id"] = nodes_df.index
@@ -148,8 +142,7 @@ def start_graph_job(use_cache: bool = True):
             # Stage 3: Streaming Serialization (IO Bound)
             job.post_progress("compressing", 0.0)
             
-            # Write GZIP manually to memory buffer.
-            # Why? pandas.to_json() creates a giant string. We want to write in chunks.
+            # Write gzip
             buf = io.BytesIO()
             with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
                 def write(s):

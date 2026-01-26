@@ -26,7 +26,6 @@ export const POINT_VS = `
     // (pos / resolution) * 2.0 - 1.0
     vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
     
-    // 3. Result
     gl_Position = vec4(clip, 0.0, 1.0);
     
     // gl_PointSize - built-in WebGL variable for point size
@@ -72,7 +71,7 @@ export const POINT_FS = `
   }
 `;
 
-// --- LINE SHADERS (Simple) ---
+// Line shader
 export const LINE_VS = `
   attribute vec2 a_position;
   uniform vec2 u_resolution;

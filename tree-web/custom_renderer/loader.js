@@ -1,25 +1,21 @@
 /**
  * Streams, decompresses, and parses the graph data from the server.
- * Uses a custom JSON parser to handle massive files without OOM errors.
  * @param {ReadableStream} readableStream - The raw GZIP stream from fetch().
  * @param {Function} onProgress - Callback for progress updates.
- * @returns {Promise<Object>} The parsed graph data (SoA).
+ * @returns {Promise<Object>} The parsed graph data.
  */
 export async function loadGraphStream(readableStream, onProgress) {
     if (!readableStream) throw new Error("No stream provided");
 
-    // 1. Decompression stream setup (GZIP)
-    // Browser unpacks .gz on the fly.
+    // 1. Decompression
     const ds = new DecompressionStream("gzip");
     const decompressedStream = readableStream.pipeThrough(ds);
     const reader = decompressedStream.getReader();
 
     const decoder = new TextDecoder("utf-8");
 
-    // 2. Memory allocation (Typed Arrays)
-    // Analog to std::vector<float> with reserve() in C++.
-    // Use flat arrays for maximum GPU speed.
-    let capacityNodes = 1000000; // Start with 1 million nodes
+    // 2. Memory allocation (typed arrays)
+    let capacityNodes = 1000000;
     let capacityLinks = 1000000;
 
     let nodeCount = 0;
@@ -38,9 +34,9 @@ export async function loadGraphStream(readableStream, onProgress) {
     let linkSrc = new Uint32Array(capacityLinks);
     let linkTgt = new Uint32Array(capacityLinks);
 
-    // Buffer for stitching text chunks
+    // Buffer for chunks stitching
     let buffer = '';
-    // State of our state machine
+    // Current state
     let state = 'SEARCH_NODES';
     let totalBytes = 0;
 
@@ -90,7 +86,7 @@ export async function loadGraphStream(readableStream, onProgress) {
         // Decode bytes to text and append to buffer tail
         buffer += decoder.decode(value, { stream: true });
 
-        // Process buffer while we can extract data
+        // Process buffer while we can
         while (true) {
             // STATE 1: Look for start of nodes list "nodes":[ (this is not an emoji)
             if (state === 'SEARCH_NODES') {
@@ -105,7 +101,7 @@ export async function loadGraphStream(readableStream, onProgress) {
                 }
             }
 
-            // STATE 2 & 3: Read objects inside arrays
+            // State 2 & 3: Read objects
             if (state === 'IN_NODES' || state === 'IN_LINKS') {
                 // Clean garbage (commas, spaces)
                 buffer = buffer.trimStart();

@@ -36,7 +36,7 @@ def _log(*args: object) -> None:
     """Prints log messages to stderr."""
     print(*args, file=sys.stderr)
 
-# --- Newick Parsing Logic ---
+# --- Newick parsing ---
 
 @dataclass
 class TNode:
@@ -50,7 +50,7 @@ class TNode:
     blen: float = 0.0
     children: List[str] = field(default_factory=list)
 
-# Regex explanation: Captures delimiters (),; OR names OR branch lengths :0.05
+# Regex for tokens
 _TOKEN_RE = re.compile(r"\s*([(),;])\s*|\s*([^(),:;]+)\s*|(\s*:\s*[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
 
 def _tokenize(newick: str) -> Iterable[str]:
@@ -304,7 +304,7 @@ def build_display_graph(
     y = assign_y_equal_leaf_spacing(nodes, leaf_step)
     report(0.15)
 
-    # 2. X-Scaling and Stem separation
+    # 2. X-scaling
     dist_px: Dict[str, float] = {u: float(dist[u]) * float(x_scale) for u in nodes}
     
     # Avoid overlapping vertical lines by spreading them
@@ -333,7 +333,7 @@ def build_display_graph(
     node_id_actual: Dict[str, int] = {}
     next_id = 0
     
-    # Caching to reuse bend points if they overlap (optimization)
+    # Caching to reuse bend points if they overlap 
     point_cache: Dict[Tuple[str, float, float], int] = {}
     link_cache: Set[Tuple[int, int]] = set()
 
