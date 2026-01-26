@@ -491,7 +491,7 @@ export class GraphRenderer {
 
         const occupied = new Set();
         let drawn = 0;
-        const MAX_LABELS = 400;
+        const MAX_LABELS = 600;
 
         // Candidate collection
         const candidates = [];
@@ -528,8 +528,8 @@ export class GraphRenderer {
             // Use larger margin to prevent pop-in at edges
             if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) continue;
 
-            const gx = Math.floor(sx / 150);
-            const gy = Math.floor(sy / 40);
+            const gx = Math.floor(sx / 120);
+            const gy = Math.floor(sy / 20);
             const key = `${gx},${gy}`;
 
             if (occupied.has(key)) continue;

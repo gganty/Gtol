@@ -120,6 +120,8 @@
 
         <div class="section">
             <span class="label">Server Compute</span>
+            <input type="file" id="compute-file-input" accept=".nwk,.tre,.tree"
+                style="width:100%; margin-top:5px; color:#aaa;">
             <button id="btn-compute">Compute Graph</button>
         </div>
 
@@ -141,21 +143,29 @@
         import { GraphRenderer } from '/custom/engine.js';
         import { loadGraphStream } from '/custom/loader.js';
 
-        // Canvas Initialization
+        // Engine initialization
         const canvas = document.getElementById('glcanvas');
         const textCanvas = document.getElementById('text-canvas');
+
+        let transform = { x: 0, y: 0, k: 0.1 }; // Start zoomed out
+        let renderer;
+        let isDragging = false;
+        let lastX = 0, lastY = 0;
 
         function resize() {
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
             textCanvas.width = window.innerWidth;
             textCanvas.height = window.innerHeight;
+
+            // Re-render immediately to avoid black flash
+            if (renderer) {
+                // Use current transform
+                renderer.setTransform(transform.x, transform.y, transform.k, false);
+            }
         }
         window.addEventListener('resize', resize);
-        resize();
 
-        // Engine Initialization
-        let renderer;
         try {
             renderer = new GraphRenderer(canvas);
             renderer.setTextCanvas(textCanvas);
@@ -163,16 +173,36 @@
             document.getElementById('status').innerText = "WebGL Error: " + e.message;
         }
 
+        resize(); // Call after renderer init (optional, but safe now)
+
         const statusEl = document.getElementById('status');
         const progressEl = document.getElementById('progress-bar');
 
-        // --- LOGIC 1: COMPUTE (Server Side -> Download Only) ---
+        // --- Compute (Server Side -> Download Only) ---
         document.getElementById('btn-compute').addEventListener('click', async () => {
-            statusEl.innerText = "Starting job...";
+            const fileInput = document.getElementById('compute-file-input');
+            if (fileInput.files.length === 0) {
+                alert("Please select a file to compute.");
+                return;
+            }
+
+            statusEl.innerText = "Uploading file and starting job...";
             progressEl.style.width = '0%';
 
-            // 1. Start Job
-            const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
+            // 1. Upload file & start job
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            const res = await fetch('/api/v2/graph/start', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!res.ok) {
+                statusEl.innerText = "Error uploading file.";
+                return;
+            }
+
             const { job_id } = await res.json();
 
             // 2. Subscribe to progress (SSE)
@@ -206,7 +236,7 @@
             };
         });
 
-        // --- LOGIC 2: RENDER (Local File OR Server Cache) ---
+        // --- Render (Local file OR Server cache) ---
         document.getElementById('btn-load-file').addEventListener('click', async () => {
             const fileInput = document.getElementById('file-input');
 
@@ -215,36 +245,15 @@
                 statusEl.innerText = "Reading local file...";
                 await processStream(fileInput.files[0].stream());
             } else {
-                // OPTION B: Render server cache (if no file selected)
-                statusEl.innerText = "Fetching server cache...";
-
-                // Trigger "start" with cache to get ID
-                const res = await fetch('/api/v2/graph/start?use_cache=true', { method: 'POST' });
-                const { job_id } = await res.json();
-
-                // Wait for job to finish (what if no cache and it started calculating?)
-                // We assume user already clicked Compute, so just download.
-                // Ideally we should subscribe to SSE too, but for simplicity we request result immediately.
-                // If result not ready, server returns 400.
-
-                // Reliability: just enter same SSE loop, but with "render_after" flag
-                // Or just fetch stream.
-
-                statusEl.innerText = "Downloading stream...";
-                const resultRes = await fetch(`/api/v2/graph/${job_id}/result`);
-                if (resultRes.ok) {
-                    await processStream(resultRes.body);
-                } else {
-                    statusEl.innerText = "Error: Cache not ready. Click Compute first.";
-                }
+                alert("Please select a local .json.gz file to render.");
             }
         });
 
-        // --- SHARED: STREAM PROCESSING ---
+        // --- Stream processing ---
         async function processStream(stream) {
             statusEl.innerText = "Parsing & Rendering...";
 
-            // Call our custom parser from loader.js
+            // Call our parser from loader.js
             const data = await loadGraphStream(stream, (msg) => {
                 statusEl.innerText = msg;
             });
@@ -252,18 +261,46 @@
             statusEl.innerText = `Rendered ${data.nodeCount.toLocaleString()} nodes`;
             progressEl.style.width = '100%';
 
-            // Auto-Fit (Center Camera)
-            // ... (simplified bounds calculation for start) ...
             renderer.setData(data);
 
-            // Reset camera
-            renderer.setTransform(-data.x[0] + canvas.width / 2, -data.y[0] + canvas.height / 2, 0.5);
+            // Auto-Fit (Center Camera)
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            // Sample points to find bounds (iterate all for accuracy)
+            for (let i = 0; i < data.nodeCount; i++) {
+                const x = data.x[i]; const y = data.y[i];
+                if (x < minX) minX = x; if (x > maxX) maxX = x;
+                if (y < minY) minY = y; if (y > maxY) maxY = y;
+            }
+
+            // Safety if empty
+            if (minX === Infinity) { minX = -100; maxX = 100; minY = -100; maxY = 100; }
+
+            const treeW = maxX - minX;
+            const treeH = maxY - minY;
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+
+            // padding 5%
+            const padding = 0.95;
+            const kW = canvas.width / treeW;
+            const kH = canvas.height / treeH;
+
+            // Choose smaller scale to fit both dimensions
+            // Handle case where treeW or treeH is very small (avoid infinity)
+            const k = Math.min(kW || 1, kH || 1) * padding;
+
+            // Center:
+            // CanvasCenter = (WorldCenter + tx) * k
+            // tx = CanvasCenter/k - WorldCenter
+            const tx = (canvas.width / 2) / k - centerX;
+
+            const ty = (canvas.height / 2) / k - centerY;
+
+            renderer.setTransform(tx, ty, k);
+            transform = { x: tx, y: ty, k: k };
         }
 
         // --- INTERACTION (Mouse & Wheel) ---
-        let transform = { x: 0, y: 0, k: 0.1 }; // Start zoomed out
-        let isDragging = false;
-        let lastX = 0, lastY = 0;
 
         canvas.addEventListener('mousedown', e => {
             isDragging = true;

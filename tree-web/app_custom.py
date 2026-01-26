@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import json
@@ -10,7 +10,8 @@ import time
 import gzip
 import io
 import os
-import hashlib
+import shutil
+import tempfile
 import pandas as pd
 from typing import Optional, Dict
 
@@ -22,17 +23,12 @@ app = FastAPI()
 # Mount static files (frontend)
 app.mount("/custom", StaticFiles(directory="custom_renderer"), name="custom")
 
-# DEFAULT TREE PATH (For the "Compute" button)
-# DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/Mammals Species.nwk"
-# DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/Chond 10Cal 10k TreeSet.tre"
-DEFAULT_TREE_PATH = "/Users/gushchin_a/Downloads/UShER SARS-CoV-2 latest.nwk"
+# Ensure temp directory exists
+TEMP_DIR = "temp_uploads"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Generate cache filename based on the source path and mtime
 algo_mtime = os.path.getmtime("tree_algo.py")
-cache_key = f"{DEFAULT_TREE_PATH}_{algo_mtime}"
-path_hash = hashlib.md5(cache_key.encode("utf-8")).hexdigest()
-CACHE_FILE = f"graph_cache_{path_hash}.json.gz"
-
 
 @app.get("/", include_in_schema=False)
 def home():
@@ -54,10 +50,12 @@ class Job:
         self.id = str(uuid.uuid4())
         self.created_at = time.time()
         self.progress_queue = queue.Queue() # Thread-safe queue for progress messages
-        self.result: Optional[bytes] = None
+        self.result_path: Optional[str] = None # Path to disk file
         self.error: Optional[str] = None
         self.done = threading.Event()       # Completion flag
         self.thread: Optional[threading.Thread] = None
+        self.temp_input_path: Optional[str] = None # Path to uploaded input file
+        self.original_filename: str = "graph.nwk" # Default if unknown
 
     def post_progress(self, stage: str, progress: float):
         """
@@ -71,6 +69,16 @@ class Job:
             self.progress_queue.put_nowait({"stage": stage, "progress": progress})
         except queue.Full:
             pass
+    
+    def cleanup(self):
+        """Deletes temporary files associated with this job."""
+        if self.temp_input_path and os.path.exists(self.temp_input_path):
+            try:
+                os.remove(self.temp_input_path)
+            except OSError:
+                pass
+        
+        # Result file is cleaned up by BackgroundTasks in the endpoint
 
 
 # Global job storage (in-memory)
@@ -80,35 +88,37 @@ def _cleanup_old_jobs():
     """Remove jobs older than 1 hour to free memory."""
     now = time.time()
     # Create list of keys to delete to avoid modifying dict while iterating
-    to_del = [jid for jid, job in JOBS.items() if now - job.created_at > 3600]
+    to_del = []
+    for jid, job in JOBS.items():
+        if now - job.created_at > 3600:
+            job.cleanup() # Delete input file if still there
+            if job.result_path and os.path.exists(job.result_path):
+                 try:
+                     os.remove(job.result_path)
+                 except OSError:
+                     pass
+            to_del.append(jid)
+    
     for jid in to_del:
         JOBS.pop(jid, None)
 
 @app.post("/api/v2/graph/start")
-def start_graph_job(use_cache: bool = True):
+def start_graph_job(file: UploadFile = File(...)):
     """
-    Starts the heavy graph calculation process in a background thread.
-    Returns the job ID immediately so the client can poll for progress.
+    Starts the heavy graph calculation process in a background thread using an uploaded file.
+    Streams input to disk and output to disk to minimize RAM usage.
     """
     _cleanup_old_jobs()
     job = Job()
     JOBS[job.id] = job
-
-    # 1. Cache check
-    print(f"[DEBUG] Request to start job. Configured Path: {DEFAULT_TREE_PATH}")
-    print(f"[DEBUG] Target Cache File: {CACHE_FILE}")
+    job.original_filename = file.filename
     
-    if use_cache and os.path.exists(CACHE_FILE):
-        print(f"[Server] Cache Hit: {CACHE_FILE}")
-        try:
-            with open(CACHE_FILE, "rb") as f:
-                job.result = f.read()
-            job.post_progress("complete", 100.0)
-            job.done.set()
-            return {"job_id": job.id}
-        except Exception as e:
-            print(f"[Server] Cache Read Error: {e}")
-            # If read error, continue recalculating
+    # Stream upload to temp file
+    input_filename = f"input_{job.id}_{file.filename}"
+    job.temp_input_path = os.path.join(TEMP_DIR, input_filename)
+    
+    with open(job.temp_input_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
     # 2. Worker function
     def compute_worker():
@@ -118,7 +128,7 @@ def start_graph_job(use_cache: bool = True):
 
             # Stage 1: Math (CPU Bound)
             # Call our function from tree_algo
-            nodes_df, links_df = build_graph(DEFAULT_TREE_PATH, progress_callback=callback)
+            nodes_df, links_df = build_graph(job.temp_input_path, progress_callback=callback)
             
             job.post_progress("optimization", 99.0)
             
@@ -142,9 +152,12 @@ def start_graph_job(use_cache: bool = True):
             # Stage 3: Streaming Serialization (IO Bound)
             job.post_progress("compressing", 0.0)
             
-            # Write gzip
-            buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+            # Prepare result file path
+            result_filename = f"result_{job.id}.json.gz"
+            job.result_path = os.path.join(TEMP_DIR, result_filename)
+            
+            # Write gzip stream directly to disk
+            with gzip.open(job.result_path, "wb") as gz:
                 def write(s):
                     gz.write(s.encode("utf-8"))
 
@@ -191,16 +204,6 @@ def start_graph_job(use_cache: bool = True):
                          time.sleep(0)  # this is necessary
 
                 write(']}') # Close JSON
-
-            job.result = buf.getvalue()
-            
-            # Save to disk cache
-            try:
-                with open(CACHE_FILE, "wb") as f:
-                     f.write(job.result)
-                print(f"[Server] Cache Saved ({len(job.result)} bytes)")
-            except Exception as e:
-                print(f"[Server] Cache Write Error: {e}")
 
             job.post_progress("complete", 100.0)
             
@@ -257,20 +260,37 @@ async def get_job_progress(job_id: str):
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
     )
 
+def delete_file(path: str):
+    try:
+        os.remove(path)
+        print(f"[Server] Deleted temp file: {path}")
+    except Exception as e:
+        print(f"[Server] Error deleting file {path}: {e}")
+
 @app.get("/api/v2/graph/{job_id}/result")
-def get_job_result(job_id: str):
+def get_job_result(job_id: str, background_tasks: BackgroundTasks):
     """
     Returns the binary file (gzipped JSON) for a completed job.
+    Streamed from disk. Deletes file after sending.
     """
     job = JOBS.get(job_id)
     if not job: return {"error": "Job not found"}, 404
     if not job.done.is_set(): return {"error": "Job not ready"}, 400
     if job.error: return {"error": job.error}, 500
-    if not job.result: return {"error": "No result data"}, 500
+    if not job.result_path or not os.path.exists(job.result_path): return {"error": "No result data on disk"}, 500
 
-    return StreamingResponse(
-        io.BytesIO(job.result),
+    # Schedule cleanup of the result file after response is sent
+    background_tasks.add_task(delete_file, job.result_path)
+    # Also cleanup input file if not already done
+    background_tasks.add_task(job.cleanup)
+
+    base_name = os.path.splitext(job.original_filename)[0]
+    out_name = f"computed_{base_name}.json.gz"
+
+    return FileResponse(
+        job.result_path,
         media_type="application/octet-stream",
+        filename=out_name,
         headers={
             "Content-Disposition": "attachment; filename=graph.json.gz",
             # IMPORTANT!!!!!!: Do not set Content-Encoding: gzip, otherwise browser unpacks it,
