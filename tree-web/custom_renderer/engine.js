@@ -50,6 +50,7 @@ export class GraphRenderer {
         this.transform = { x: 0, y: 0, k: 1.0 };
         this.isInteracting = false;
         this.pendingFrame = null;
+        this.dpr = window.devicePixelRatio || 1;
     }
 
     setTextCanvas(canvas) {
@@ -347,13 +348,23 @@ export class GraphRenderer {
 
         if (!this.grid) return; // Not loaded
 
+        // Update DPR in case it changed (e.g. window move to other monitor)
+        this.dpr = window.devicePixelRatio || 1;
+
         const { x: tx, y: ty, k } = this.transform;
+
+        // Effective zoom for physical pixels
+        // WebGL needs to output to physical coordinates (-1..1 maps to 0..Width*DPR)
+        // If we use physical width for Resolution uniform, we must scale zoom by DPR.
+        const physK = k * this.dpr;
 
         // Offset transform by graph center since GPU buffers are centered
         const glTx = tx + (this.centerX || 0);
         const glTy = ty + (this.centerY || 0);
 
         // --- LOD logic ---
+        // Use physical W/H for uniform calculation
+        // But for LOD (world bounds), using physical W + physical K cancels out to same logic.
 
         // 1. World view
         const screenMinX = -w; const screenMaxX = 2 * w;
@@ -424,7 +435,7 @@ export class GraphRenderer {
                 const chunkTx = tx + chunk.x1;
                 const chunkTy = ty + chunk.y1;
 
-                gl.uniform3f(this.locLineTrans, chunkTx, chunkTy, k);
+                gl.uniform3f(this.locLineTrans, chunkTx, chunkTy, physK);
                 gl.drawArrays(gl.LINES, chunk.linkStartIndex * 2, chunk.linkCount * 2);
             }
         }
@@ -458,7 +469,7 @@ export class GraphRenderer {
                 const chunkTx = tx + chunk.x1;
                 const chunkTy = ty + chunk.y1;
 
-                gl.uniform3f(this.locTrans, chunkTx, chunkTy, k);
+                gl.uniform3f(this.locTrans, chunkTx, chunkTy, physK);
 
                 // Draw range from sorted buffers
                 gl.drawArrays(gl.POINTS, chunk.startIndex, drawCount);
@@ -467,7 +478,7 @@ export class GraphRenderer {
 
         // 5. Labels
         if (this.ctx) {
-            this.renderLabels(w, h, visibleNodeChunks, lodRatio);
+            this.renderLabels(w / this.dpr, h / this.dpr, visibleNodeChunks, lodRatio);
         }
     }
 
@@ -482,9 +493,13 @@ export class GraphRenderer {
      */
     renderLabels(w, h, visibleChunks, lodRatio) {
         const ctx = this.ctx;
+        // Since we scale ctx by DPR in index.html, we clear logical area
         ctx.clearRect(0, 0, w, h);
+
         ctx.fillStyle = "white";
-        ctx.font = "500 10px sans-serif";
+        ctx.font = "12px sans-serif";
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
         ctx.textAlign = "center";
 
         if (!this.sortedIndices) return;
@@ -534,7 +549,10 @@ export class GraphRenderer {
 
             if (occupied.has(key)) continue;
 
-            ctx.fillText(this.dataLabels[idx], sx, sy - 5);
+            const text = this.dataLabels[idx];
+            ctx.strokeText(text, sx, sy - 5);
+            ctx.fillText(text, sx, sy - 5);
+
             occupied.add(key);
             drawn++;
         }
@@ -558,4 +576,6 @@ export class GraphRenderer {
             });
         }
     }
+
+
 }

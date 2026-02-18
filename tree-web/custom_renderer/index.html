@@ -193,6 +193,41 @@
             margin-bottom: 10px;
             color: #ccc;
         }
+
+        /* Search */
+        #search-container {
+            margin-bottom: 15px;
+            position: relative;
+        }
+
+        #search-results {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: rgba(30, 30, 30, 0.95);
+            border: 1px solid #444;
+            max-height: 200px;
+            overflow-y: auto;
+            border-radius: 6px;
+            display: none;
+            z-index: 20;
+        }
+
+        .result-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #333;
+            font-size: 13px;
+        }
+
+        .result-item:hover {
+            background: #3b82f6;
+        }
+
+        .result-item:last-child {
+            border-bottom: none;
+        }
     </style>
 </head>
 
@@ -230,6 +265,18 @@
             <h3>Controls</h3>
 
             <div class="section">
+                <span class="label">Search Node</span>
+                <div id="search-container">
+                    <input type="text" id="search-input" placeholder="Name or Regex..."
+                        style="width: 100%; box-sizing: border-box; padding: 8px; margin-top: 5px; background: #222; border: 1px solid #444; color: white; border-radius: 4px;">
+                    <div style="margin-top: 5px; font-size: 12px;">
+                        <input type="checkbox" id="search-regex"> <label for="search-regex">Use Regex</label>
+                    </div>
+                    <div id="search-results"></div>
+                </div>
+            </div>
+
+            <div class="section">
                 <span class="label">Camera</span>
                 <div style="display: flex; gap: 5px; margin-top: 5px;">
                     <button id="btn-zoom-in" class="btn-control">+</button>
@@ -260,14 +307,31 @@
         let lastX = 0, lastY = 0;
 
         function resize() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-            textCanvas.width = window.innerWidth;
-            textCanvas.height = window.innerHeight;
+            const dpr = window.devicePixelRatio || 1;
+            // Physical Size (Backing Store)
+            canvas.width = window.innerWidth * dpr;
+            canvas.height = window.innerHeight * dpr;
+            textCanvas.width = window.innerWidth * dpr;
+            textCanvas.height = window.innerHeight * dpr;
 
-            // Re-render immediately to avoid black flash
+            // Logical Size (CSS Layout)
+            // canvas.style.width/height is already 100vw/100vh via CSS (absolute pos)
+            // But explicitly setting it helps some browsers?
+            // Actually the CSS 'width: 100vw' handles the style size.
+            // But let's be explicit to avoid mismatches.
+            canvas.style.width = window.innerWidth + 'px';
+            canvas.style.height = window.innerHeight + 'px';
+            textCanvas.style.width = window.innerWidth + 'px';
+            textCanvas.style.height = window.innerHeight + 'px';
+
+            // Scale 2D Context for High DPI
+            const ctx = textCanvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+
             if (renderer) {
-                // Use current transform
+                // Pass dpr setting to renderer? 
+                // We'll update renderer logic to detect it or we can pass it.
+                // But renderer can just read window.devicePixelRatio.
                 renderer.setTransform(transform.x, transform.y, transform.k, false);
             }
         }
@@ -370,6 +434,10 @@
 
             renderer.setData(data);
             currentData = data;
+
+            // Init Worker
+            worker.postMessage({ type: 'INIT', labels: data.labels });
+
             fitToScreen(data);
 
             // Show controls panel with fade-in animation
@@ -402,17 +470,14 @@
 
             // padding 5%
             const padding = 0.95;
-            const kW = canvas.width / treeW;
-            const kH = canvas.height / treeH;
+            const kW = window.innerWidth / treeW;
+            const kH = window.innerHeight / treeH;
 
             // Choose smaller scale to fit both dimensions
             const k = Math.min(kW || 1, kH || 1) * padding;
 
-            // Center:
-            // CanvasCenter = (WorldCenter + tx) * k
-            // tx = CanvasCenter/k - WorldCenter
-            const tx = (canvas.width / 2) / k - centerX;
-            const ty = (canvas.height / 2) / k - centerY;
+            const tx = (window.innerWidth / 2) / k - centerX;
+            const ty = (window.innerHeight / 2) / k - centerY;
 
             renderer.setTransform(tx, ty, k);
             transform = { x: tx, y: ty, k: k };
@@ -434,8 +499,8 @@
         function applyZoom(factor) {
             if (!renderer) return;
             // Zoom towards center of screen
-            const mx = canvas.width / 2;
-            const my = canvas.height / 2;
+            const mx = window.innerWidth / 2;
+            const my = window.innerHeight / 2;
 
             // Logic similar to wheel
             // WorldX = (ScreenX / k) - tx
@@ -502,7 +567,7 @@
             const direction = e.deltaY > 0 ? 1 / zoomFactor : zoomFactor;
 
             const mx = e.clientX;
-            const my = canvas.height - e.clientY; // Invert Y for math
+            const my = window.innerHeight - e.clientY; // Invert Y for math
 
             // Zoom to cursor math
             // WorldX = (ScreenX / k) - tx
@@ -527,6 +592,127 @@
                 renderer.setTransform(transform.x, transform.y, transform.k, false);
             }, 200);
         }, { passive: false });
+
+        // --- Search System ---
+        const worker = new Worker('/custom/search.worker.js');
+        const searchInput = document.getElementById('search-input');
+        const searchRegex = document.getElementById('search-regex');
+        const searchResults = document.getElementById('search-results');
+        let searchDebounce;
+
+        worker.onmessage = function (e) {
+            const { type, results } = e.data;
+            if (type === 'RESULTS') {
+                renderSearchResults(results);
+            }
+        };
+
+        function renderSearchResults(results) {
+            searchResults.innerHTML = '';
+            if (results.length === 0) {
+                searchResults.style.display = 'none';
+                return;
+            }
+
+            searchResults.style.display = 'block';
+            results.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'result-item';
+                div.textContent = item.label;
+                div.addEventListener('click', () => {
+                    if (currentData) {
+                        const x = currentData.x[item.index];
+                        const y = currentData.y[item.index];
+                        flyTo(x, y);
+                        searchResults.style.display = 'none';
+                    }
+                });
+                searchResults.appendChild(div);
+            });
+        }
+
+        function flyTo(targetX, targetY) {
+            if (!renderer) return;
+
+            // 1. Determine target zoom
+            const startK = transform.k;
+            const targetK = Math.max(startK, 8.0);
+
+            // 2. Logic to interpolate center point, not TopLeft translation
+            // Start center in World Coordinates
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+
+            // Current center
+            const startWx = (w / 2) / startK - transform.x;
+            const startWy = (h / 2) / startK - transform.y;
+
+            // 3. Animation loop
+            const startTime = performance.now();
+            const duration = 1500; // ms
+
+            // Easing: easeInOutCubic
+            const ease = (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+            function animate(now) {
+                const elapsed = now - startTime;
+                if (elapsed >= duration) {
+                    // Finish exactly
+                    // Final transform.x = ScreenCenter/targetK - TargetWorld
+                    transform.k = targetK;
+                    transform.x = (w / 2) / targetK - targetX;
+                    transform.y = (h / 2) / targetK - targetY;
+                    renderer.setTransform(transform.x, transform.y, transform.k, false);
+                    return;
+                }
+
+                const t = ease(elapsed / duration);
+
+                // Exponential interpolation for zoom
+                // k(t) = startK * (targetK/startK)^t
+                const k = startK * Math.pow(targetK / startK, t);
+
+                // Linear interpolation for world center
+                const wx = startWx + (targetX - startWx) * t;
+                const wy = startWy + (targetY - startWy) * t;
+
+                // Update State
+                transform.k = k;
+                transform.x = (w / 2) / k - wx;
+                transform.y = (h / 2) / k - wy;
+
+                renderer.setTransform(transform.x, transform.y, transform.k, true); // true = Interacting (faster)
+                requestAnimationFrame(animate);
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        searchInput.addEventListener('input', () => {
+            const query = searchInput.value;
+            clearTimeout(searchDebounce);
+
+            if (query.length < 2) {
+                searchResults.style.display = 'none';
+                return;
+            }
+
+            searchDebounce = setTimeout(() => {
+                worker.postMessage({
+                    type: 'SEARCH',
+                    query: query,
+                    isRegex: searchRegex.checked,
+                    limit: 30
+                });
+            }, 300);
+        });
+
+        // Hide results on click outside
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('search-container').contains(e.target)) {
+                searchResults.style.display = 'none';
+            }
+        });
 
     </script>
 </body>
