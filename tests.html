@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Tree Algo Tests</title>
+    <style>
+        body {
+            font-family: monospace;
+            background: #222;
+            color: #ddd;
+            padding: 20px;
+        }
+
+        .pass {
+            color: green;
+        }
+
+        .fail {
+            color: red;
+            font-weight: bold;
+        }
+
+        h2 {
+            border-bottom: 1px solid #555;
+            padding-bottom: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Tree Algorithm Verification</h1>
+    <div id="results">Running tests...</div>
+
+    <script type="module">
+        import { parseNewick, computeLayout } from './src/logic/tree_algo_iterative.js';
+        import { saveToGTOL, loadFromGTOL } from './src/io/binary_format.js';
+
+        const logs = [];
+        function log(msg, type = 'info') {
+            logs.push(`<div class="${type}">${msg}</div>`);
+            document.getElementById('results').innerHTML = logs.join('');
+        }
+        function assert(cond, msg) {
+            if (cond) log(`PASS: ${msg}`, 'pass');
+            else log(`FAIL: ${msg}`, 'fail');
+        }
+
+        async function runTests() {
+            try {
+                // test 1: Simple parse
+                log('<h2>1. Newick Parser</h2>');
+                const nwk = '(A:0.1,B:0.2)C;';
+                const tree = parseNewick(nwk);
+                assert(tree.count === 3, 'Node count should be 3');
+                assert(tree.names[0] === 'A' || tree.names[1] === 'A', 'Leaf A exists');
+                assert(tree.names[tree.root] === 'C', 'Root name is C');
+
+                // test 2: Layout
+                log('<h2>2. Layout Computation</h2>');
+                const layout = computeLayout(tree);
+                assert(layout.x.length === 3, 'Layout X array length correct');
+                assert(layout.y.length === 3, 'Layout Y array length correct');
+                // leaves should be at different Y
+                const leafIndices = [];
+                for (let i = 0; i < 3; i++) if (tree.children[i].length === 0) leafIndices.push(i);
+                assert(layout.y[leafIndices[0]] !== layout.y[leafIndices[1]], 'Leaves have distinct Y coordinates');
+
+                // test 3: Binary format roundtrip
+                log('<h2>3. GTOL Binary Format</h2>');
+                const dummyData = {
+                    nodeCount: 3,
+                    linkCount: 2,
+                    x: new Float32Array([0, 10, 5]),
+                    y: new Float32Array([0, 10, 5]),
+                    size: new Float32Array([1, 1, 1]),
+                    r: new Float32Array([1, 0, 0]),
+                    g: new Float32Array([0, 1, 0]),
+                    b: new Float32Array([0, 0, 1]),
+                    linkSrc: new Uint32Array([2, 2]),
+                    linkTgt: new Uint32Array([0, 1]),
+                    labels: ['Leaf A', 'Leaf B', 'Root']
+                };
+
+                const buffer = saveToGTOL(dummyData);
+                assert(buffer.byteLength > 64, `Buffer produced (${buffer.byteLength} bytes)`);
+
+                const loaded = loadFromGTOL(buffer);
+                assert(loaded.nodeCount === 3, 'Loaded node count matches');
+                assert(loaded.labels[0] === 'Leaf A', 'Loaded label 0 matches');
+                assert(loaded.x[1] === 10, 'Loaded X coord matches');
+
+                log('<h2>All Tests Completed</h2>');
+
+            } catch (e) {
+                log(`EXCEPTION: ${e.message}`, 'fail');
+                console.error(e);
+            }
+        }
+
+        runTests();
+    </script>
+</body>
+
+</html>

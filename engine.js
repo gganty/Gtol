@@ -3,7 +3,7 @@ import { POINT_VS, POINT_FS, LINE_VS, LINE_FS } from './shaders.js';
 export class GraphRenderer {
     /**
      * WebGL-based renderer for massive graphs.
-     * Uses Point Sprites for nodes and Lines for edges.
+     * Uses point sprites for nodes and lines for edges.
      * Implements spatial hashing and dynamic LOD for performance.
      * @param {HTMLCanvasElement} canvas - The WebGL canvas element.
      */
@@ -17,11 +17,11 @@ export class GraphRenderer {
 
         if (!this.gl) throw new Error("WebGL not supported");
 
-        // Initialization of programs and variables
+        // initialization of programs and variables
         this.program = this.createProgram(POINT_VS, POINT_FS);
         this.programLine = this.createProgram(LINE_VS, LINE_FS);
 
-        // Attributes & Uniforms (Points)
+        // attributes & uniforms (points)
         this.locPos = this.gl.getAttribLocation(this.program, 'a_position');
         this.locSize = this.gl.getAttribLocation(this.program, 'a_size');
         this.locColor = this.gl.getAttribLocation(this.program, 'a_color');
@@ -29,12 +29,12 @@ export class GraphRenderer {
         this.locTrans = this.gl.getUniformLocation(this.program, 'u_transform');
         this.locIsLine = this.gl.getUniformLocation(this.program, 'u_is_line');
 
-        // Attributes & Uniforms (Lines)
+        // attributes & uniforms (lines)
         this.locLinePos = this.gl.getAttribLocation(this.programLine, 'a_position');
         this.locLineRes = this.gl.getUniformLocation(this.programLine, 'u_resolution');
         this.locLineTrans = this.gl.getUniformLocation(this.programLine, 'u_transform');
 
-        // Buffers
+        // buffers
         this.bufPos = this.gl.createBuffer();
         this.bufSize = this.gl.createBuffer();
         this.bufColor = this.gl.createBuffer();
@@ -43,7 +43,7 @@ export class GraphRenderer {
         this.gl.enable(this.gl.BLEND);
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
-        // Extension for indices > 65535
+        // extension for indices > 65535
         this.ext = this.gl.getExtension('OES_element_index_uint');
 
         this.ctx = null;
@@ -58,7 +58,7 @@ export class GraphRenderer {
     }
 
     /**
-     * Creates and links a WebGL program from vertex and fragment shaders.
+     * creates and links a WebGL program from vertex and fragment shaders.
      * @param {string} vsSource - Vertex shader source code.
      * @param {string} fsSource - Fragment shader source code.
      * @returns {WebGLProgram} The linked WebGL program.
@@ -75,7 +75,7 @@ export class GraphRenderer {
     }
 
     /**
-     * Compiles a single shader.
+     * compiles a single shader.
      * @param {number} type - gl.VERTEX_SHADER or gl.FRAGMENT_SHADER.
      * @param {string} source - Shader source code.
      * @returns {WebGLShader} The compiled shader.
@@ -107,13 +107,13 @@ export class GraphRenderer {
         this.nodeCount = data.nodeCount;
         this.linkCount = data.linkCount;
 
-        // Save references for labels (original order)
+        // save references for labels (original order)
         this.dataX = data.x;
         this.dataY = data.y;
         this.dataLabels = data.labels;
         this.dataSize = data.size;
 
-        // 1. Calculate bounds & center
+        // 1. calculate bounds & center
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (let i = 0; i < this.nodeCount; i++) {
             const x = data.x[i]; const y = data.y[i];
@@ -121,7 +121,7 @@ export class GraphRenderer {
             if (y < minY) minY = y; if (y > maxY) maxY = y;
         }
 
-        // Padding & Center
+        // padding & center
         const padX = (maxX - minX) * 0.01;
         const padY = (maxY - minY) * 0.01;
         this.minX = minX - padX;
@@ -135,7 +135,7 @@ export class GraphRenderer {
         const width = this.maxX - this.minX;
         const height = this.maxY - this.minY;
 
-        // 2. Setup grid
+        // 2. setup grid
         console.time("AdaptiveGrid");
         const TARGET_CHUNKS = 4096;
         const aspect = width / height;
@@ -152,7 +152,7 @@ export class GraphRenderer {
             chunks: new Array(nCols * nRows)
         };
 
-        // Helpers
+        // helpers
         const getChunkIdx = (x, y) => {
             let cx = Math.floor(((x - this.minX) / width) * nCols);
             let cy = Math.floor(((y - this.minY) / height) * nRows);
@@ -161,19 +161,19 @@ export class GraphRenderer {
             return cy * nCols + cx;
         };
 
-        // 3. Count
+        // 3. count
         const counts = new Uint32Array(nCols * nRows);
         for (let i = 0; i < this.nodeCount; i++) {
             counts[getChunkIdx(data.x[i], data.y[i])]++;
         }
 
-        // 4. Initialize chunks
+        // 4. initialize chunks
         const offsets = new Uint32Array(nCols * nRows);
         let accum = 0;
         for (let i = 0; i < counts.length; i++) {
             offsets[i] = accum;
 
-            // Chunk bounds
+            // chunk bounds
             const cx = i % nCols;
             const cy = Math.floor(i / nCols);
 
@@ -182,14 +182,14 @@ export class GraphRenderer {
 
             this.grid.chunks[i] = {
                 id: i,
-                startIndex: accum, // Index in the GPU arrays
+                startIndex: accum, // index in the GPU arrays
                 count: counts[i],
                 x1: chunkX1,
                 y1: chunkY1,
                 x2: this.minX + (cx + 1) * (width / nCols),
                 y2: chunkY1 + (height / nRows),
 
-                // Edge Bounding Box (initially invalid)
+                // edge bounding box
                 linkMinX: Infinity,
                 linkMaxX: -Infinity,
                 linkMinY: Infinity,
@@ -201,7 +201,7 @@ export class GraphRenderer {
             accum += counts[i];
         }
 
-        // 5. Sort indices
+        // 5. sort indices
         const sortedIndices = new Uint32Array(this.nodeCount);
         const currOffsets = new Uint32Array(offsets);
 
@@ -210,7 +210,7 @@ export class GraphRenderer {
             sortedIndices[currOffsets[c]++] = i;
         }
 
-        // 6. Sort chunks by size
+        // 6. sort chunks by size
         for (const chunk of this.grid.chunks) {
             if (chunk.count === 0) continue;
             const start = chunk.startIndex;
@@ -219,24 +219,24 @@ export class GraphRenderer {
             sub.sort((a, b) => data.size[b] - data.size[a]);
         }
 
-        // --- Process edges ---
+        // --- process edges ---
         if (this.linkCount > 0) {
-            // A. Count edges per chunk
-            // We use the SOURCE node to determine which chunk "owns" the edge.
+            // a. count edges per chunk
+            // we use the source node to determine which chunk owns the edge.
             const linkCounts = new Uint32Array(nCols * nRows);
             for (let i = 0; i < this.linkCount; i++) {
                 const s = data.linkSrc[i];
-                // Lookup chunk of source node
+                // lookup chunk of source node
                 linkCounts[getChunkIdx(data.x[s], data.y[s])]++;
             }
 
-            // B. Calculate offsets for links
+            // b. calculate offsets for links
             const linkOffsets = new Uint32Array(nCols * nRows);
             let linkAccum = 0;
             for (let i = 0; i < linkCounts.length; i++) {
                 linkOffsets[i] = linkAccum;
 
-                // Store metadata in chunk
+                // store metadata in chunk
                 if (this.grid.chunks[i]) {
                     this.grid.chunks[i].linkStartIndex = linkAccum;
                     this.grid.chunks[i].linkCount = linkCounts[i];
@@ -245,7 +245,7 @@ export class GraphRenderer {
                 linkAccum += linkCounts[i];
             }
 
-            // C. Sort links
+            // c. sort links
             this.bufLinkPos = gl.createBuffer();
             const linkPos = new Float32Array(this.linkCount * 4);
             const currLinkOffsets = new Uint32Array(linkOffsets);
@@ -254,7 +254,7 @@ export class GraphRenderer {
                 const s = data.linkSrc[i];
                 const t = data.linkTgt[i];
 
-                // Identify Chunk
+                // Identify chunk
                 const sx = data.x[s];
                 const sy = data.y[s];
                 const tx = data.x[t];
@@ -263,11 +263,11 @@ export class GraphRenderer {
                 const cIdx = getChunkIdx(sx, sy);
                 const chunk = this.grid.chunks[cIdx];
 
-                // Destination Index in Sorted Buffer
+                // destination index in sorted buffer
                 const ptr = currLinkOffsets[cIdx]++;
                 const offset = ptr * 4;
 
-                // Store relative to chunk origin
+                // store relative to chunk origin
                 // x1, y1 (Source)
                 linkPos[offset] = sx - chunk.x1;
                 linkPos[offset + 1] = sy - chunk.y1;
@@ -276,7 +276,7 @@ export class GraphRenderer {
                 linkPos[offset + 2] = tx - chunk.x1;
                 linkPos[offset + 3] = ty - chunk.y1;
 
-                // Update Chunk Edge Bounds (Include both Source and Target)
+                // update chunk edge bounds (include both source and target)
                 if (sx < chunk.linkMinX) chunk.linkMinX = sx;
                 if (sx > chunk.linkMaxX) chunk.linkMaxX = sx;
                 if (sy < chunk.linkMinY) chunk.linkMinY = sy;
@@ -292,8 +292,8 @@ export class GraphRenderer {
             gl.bufferData(gl.ARRAY_BUFFER, linkPos, gl.STATIC_DRAW);
         }
 
-        // 7. Generate GPU buffers for nodes
-        // We recreate data arrays in the sorted order.
+        // 7. generate GPU buffers for nodes
+        // we recreate data arrays in the sorted order.
         const posData = new Float32Array(this.nodeCount * 2);
         const colData = new Float32Array(this.nodeCount * 3);
         const sizeData = new Float32Array(this.nodeCount); // bufSize
@@ -301,26 +301,26 @@ export class GraphRenderer {
         for (let i = 0; i < this.nodeCount; i++) {
             const originalIdx = sortedIndices[i];
 
-            // Optimized lookup
+            // optimized lookup
             const ox = data.x[originalIdx];
             const oy = data.y[originalIdx];
 
             const cIdx = getChunkIdx(ox, oy);
             const chunk = this.grid.chunks[cIdx];
 
-            // Chunk relative position
+            // chunk relative position
             // pos = absolute - chunkOrigin
             posData[i * 2] = ox - chunk.x1;
             posData[i * 2 + 1] = oy - chunk.y1;
 
-            // Copy other props
+            // copy other props
             sizeData[i] = data.size[originalIdx];
             colData[i * 3] = data.r[originalIdx];
             colData[i * 3 + 1] = data.g[originalIdx];
             colData[i * 3 + 2] = data.b[originalIdx];
         }
 
-        // Upload Points
+        // upload points
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
         gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
 
@@ -330,7 +330,7 @@ export class GraphRenderer {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bufColor);
         gl.bufferData(gl.ARRAY_BUFFER, colData, gl.STATIC_DRAW);
 
-        this.sortedIndices = sortedIndices; // Expose for Labels
+        this.sortedIndices = sortedIndices; // expose for labels
         console.timeEnd("AdaptiveGrid");
     }
 
@@ -346,27 +346,26 @@ export class GraphRenderer {
         gl.clearColor(0.0, 0.0, 0.0, 1.0);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        if (!this.grid) return; // Not loaded
+        if (!this.grid) return; // not loaded
 
-        // Update DPR in case it changed (e.g. window move to other monitor)
+        // update DPR in case it changed (e.g. window move to other monitor)
         this.dpr = window.devicePixelRatio || 1;
 
         const { x: tx, y: ty, k } = this.transform;
 
-        // Effective zoom for physical pixels
+        // effective zoom for physical pixels
         // WebGL needs to output to physical coordinates (-1..1 maps to 0..Width*DPR)
         // If we use physical width for Resolution uniform, we must scale zoom by DPR.
         const physK = k * this.dpr;
 
-        // Offset transform by graph center since GPU buffers are centered
+        // offset transform by graph center since GPU buffers are centered
         const glTx = tx + (this.centerX || 0);
         const glTy = ty + (this.centerY || 0);
 
         // --- LOD logic ---
-        // Use physical W/H for uniform calculation
-        // But for LOD (world bounds), using physical W + physical K cancels out to same logic.
+        // use physical W/H for uniform calculation
 
-        // 1. World view
+        // 1. world view
         const screenMinX = -w; const screenMaxX = 2 * w;
         const screenMinY = -h; const screenMaxY = 2 * h;
 
@@ -375,14 +374,14 @@ export class GraphRenderer {
         const worldMinY = (h - screenMaxY) / k - ty;
         const worldMaxY = (h - screenMinY) / k - ty;
 
-        // 2. Visible chunks
+        // 2. visible chunks
         const visibleNodeChunks = [];
         const visibleLinkChunks = [];
 
         let potentialPoints = 0;
 
         for (const chunk of this.grid.chunks) {
-            // A. Check node visibility
+            // a. check node visibility
             let isNodeVisible = false;
 
             if (chunk.count > 0 &&
@@ -394,12 +393,12 @@ export class GraphRenderer {
                 isNodeVisible = true;
             }
 
-            // B. Check link visibility
+            // b. check link visibility
             if (chunk.linkCount > 0) {
                 if (isNodeVisible) {
                     visibleLinkChunks.push(chunk);
                 } else {
-                    // Extended check
+                    // extended check
                     if (!(chunk.linkMaxX < worldMinX || chunk.linkMinX > worldMaxX ||
                         chunk.linkMaxY < worldMinY || chunk.linkMinY > worldMaxY)) {
                         visibleLinkChunks.push(chunk);
@@ -408,7 +407,7 @@ export class GraphRenderer {
             }
         }
 
-        // 3. Draw count
+        // 3. draw count
         const MAX_VERTS = 1000000; // budget
 
         let lodRatio = 1.0;
@@ -416,9 +415,9 @@ export class GraphRenderer {
             lodRatio = MAX_VERTS / potentialPoints;
         }
 
-        // 4. Draw
+        // 4. draw
 
-        // Pass 1: Lines
+        // pass 1: lines
         if (potentialPoints < 500000 && this.bufLinkPos) {
             gl.useProgram(this.programLine);
             gl.uniform2f(this.locLineRes, w, h);
@@ -430,8 +429,7 @@ export class GraphRenderer {
             for (const chunk of visibleLinkChunks) {
                 if (!chunk.linkCount) continue;
 
-                // Chunk Relative Translation for Lines
-                // (Using same chunk origin as points)
+                // chunk relative translation for lines
                 const chunkTx = tx + chunk.x1;
                 const chunkTy = ty + chunk.y1;
 
@@ -440,12 +438,12 @@ export class GraphRenderer {
             }
         }
 
-        // Pass 2: Points
+        // pass 2: points
         gl.useProgram(this.program);
         gl.uniform2f(this.locRes, w, h);
         gl.uniform1i(this.locIsLine, 0);
 
-        // Bind buffers
+        // bind buffers
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
         gl.vertexAttribPointer(this.locPos, 2, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locPos);
@@ -458,12 +456,12 @@ export class GraphRenderer {
         gl.vertexAttribPointer(this.locColor, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(this.locColor);
 
-        // We use drawArrays, no index buffer needed for points now
+        // we use drawArrays, no index buffer needed for points now
 
         for (const chunk of visibleNodeChunks) {
             const drawCount = Math.ceil(chunk.count * lodRatio);
             if (drawCount > 0) {
-                // Chunk relative translation
+                // chunk relative translation
                 // ScreenPos = (LocalX + ChunkX + transX) * k
 
                 const chunkTx = tx + chunk.x1;
@@ -471,20 +469,20 @@ export class GraphRenderer {
 
                 gl.uniform3f(this.locTrans, chunkTx, chunkTy, physK);
 
-                // Draw range from sorted buffers
+                // draw range from sorted buffers
                 gl.drawArrays(gl.POINTS, chunk.startIndex, drawCount);
             }
         }
 
-        // 5. Labels
+        // 5. labels
         if (this.ctx) {
             this.renderLabels(w / this.dpr, h / this.dpr, visibleNodeChunks, lodRatio);
         }
     }
 
     /**
-     * Renders text labels on the 2D overlay canvas.
-     * Uses a hybrid strategy: Global importance (size) for zoomed-out views, 
+     * renders text labels on the 2D overlay canvas.
+     * uses a hybrid strategy: global importance (size) for zoomed-out views, 
      * and spatial scanning for zoomed-in views.
      * @param {number} w - Canvas width.
      * @param {number} h - Canvas height.
@@ -493,7 +491,7 @@ export class GraphRenderer {
      */
     renderLabels(w, h, visibleChunks, lodRatio) {
         const ctx = this.ctx;
-        // Since we scale ctx by DPR in index.html, we clear logical area
+        // since we scale ctx by DPR in index.html, we clear logical area
         ctx.clearRect(0, 0, w, h);
 
         ctx.fillStyle = "white";
@@ -508,10 +506,10 @@ export class GraphRenderer {
         let drawn = 0;
         const MAX_LABELS = 600;
 
-        // Candidate collection
+        // candidate collection
         const candidates = [];
 
-        // Target sorting pool
+        // target sorting pool
         const targetCandidates = 2000;
         const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
 
@@ -521,16 +519,16 @@ export class GraphRenderer {
             const start = chunk.startIndex;
             const end = chunk.startIndex + chunk.count;
 
-            // Collect top 'count' nodes
+            // collect top 'count' nodes
             for (let i = start; i < end && i < start + count; i++) {
                 candidates.push(this.sortedIndices[i]);
             }
         }
 
-        // Sort candidates globally by size
+        // sort candidates globally by size
         candidates.sort((a, b) => this.dataSize[b] - this.dataSize[a]);
 
-        // Draw
+        // draw
         for (const idx of candidates) {
             if (drawn >= MAX_LABELS) break;
 
@@ -539,8 +537,8 @@ export class GraphRenderer {
             const sx = px;
             const sy = h - py;
 
-            // Simple skip if way off screen
-            // Use larger margin to prevent pop-in at edges
+            // simple skip if way off screen
+            // use larger margin to prevent pop-in at edges
             if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) continue;
 
             const gx = Math.floor(sx / 120);
@@ -549,9 +547,12 @@ export class GraphRenderer {
 
             if (occupied.has(key)) continue;
 
-            const text = this.dataLabels[idx];
-            ctx.strokeText(text, sx, sy - 5);
-            ctx.fillText(text, sx, sy - 5);
+            let text = this.dataLabels.get ? this.dataLabels.get(idx) : this.dataLabels[idx];
+
+            if (text && text !== "undefined") {
+                ctx.strokeText(text, sx, sy - 5);
+                ctx.fillText(text, sx, sy - 5);
+            }
 
             occupied.add(key);
             drawn++;
@@ -559,7 +560,7 @@ export class GraphRenderer {
     }
 
     /**
-     * Updates the camera transform (pan/zoom) and requests a new frame.
+     * updates the camera transform (pan/zoom) and requests a new frame.
      * @param {number} x - Translation X.
      * @param {number} y - Translation Y.
      * @param {number} k - Zoom scale.

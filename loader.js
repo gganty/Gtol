@@ -7,43 +7,43 @@
 export async function loadGraphStream(readableStream, onProgress) {
     if (!readableStream) throw new Error("No stream provided");
 
-    // 1. Decompression
+    // 1. decompression
     const ds = new DecompressionStream("gzip");
     const decompressedStream = readableStream.pipeThrough(ds);
     const reader = decompressedStream.getReader();
 
     const decoder = new TextDecoder("utf-8");
 
-    // 2. Memory allocation (typed arrays)
+    // 2. memory allocation (typed arrays)
     let capacityNodes = 1000000;
     let capacityLinks = 1000000;
 
     let nodeCount = 0;
     let linkCount = 0;
 
-    // Arrays for Nodes (Structure of Arrays layout)
+    // arrays for Nodes (Structure of Arrays layout)
     let xArr = new Float32Array(capacityNodes);
     let yArr = new Float32Array(capacityNodes);
     let sizeArr = new Float32Array(capacityNodes);
-    let rArr = new Float32Array(capacityNodes); // Red
-    let gArr = new Float32Array(capacityNodes); // Green
-    let bArr = new Float32Array(capacityNodes); // Blue
+    let rArr = new Float32Array(capacityNodes); // red
+    let gArr = new Float32Array(capacityNodes); // green
+    let bArr = new Float32Array(capacityNodes); // blue
     let labelsArr = new Array(capacityNodes);   // JS Strings are managed by V8
 
-    // Arrays for Links
+    // arrays for Links
     let linkSrc = new Uint32Array(capacityLinks);
     let linkTgt = new Uint32Array(capacityLinks);
 
-    // Buffer for chunks stitching
+    // buffer for chunks stitching
     let buffer = '';
-    // Current state
+    // current state
     let state = 'SEARCH_NODES';
     let totalBytes = 0;
 
-    // --- Helpers ---
+    // --- helpers ---
 
     function resizeNodes() {
-        // Double the size (Amortized O(1) insertion)
+        // double the size (Amortized O(1) insertion)
         capacityNodes *= 2;
         // console.log("Resizing nodes to", capacityNodes);
 
@@ -61,12 +61,12 @@ export async function loadGraphStream(readableStream, onProgress) {
         const newTgt = new Uint32Array(capacityLinks); newTgt.set(linkTgt); linkTgt = newTgt;
     }
 
-    // Fast color parsing #RRGGBB
+    // fast color parsing #RRGGBB
     function parseColor(hexStr, idx) {
         if (!hexStr) return;
         if (hexStr.startsWith('#')) hexStr = hexStr.slice(1);
 
-        // Bitwise shifts in JS are slower than parseInt for strings, so:
+        // bitwise shifts in JS are slower than parseInt for strings, so:
         const r = parseInt(hexStr.substring(0, 2), 16) / 255.0;
         const g = parseInt(hexStr.substring(2, 4), 16) / 255.0;
         const b = parseInt(hexStr.substring(4, 6), 16) / 255.0;
@@ -76,46 +76,46 @@ export async function loadGraphStream(readableStream, onProgress) {
         bArr[idx] = b || 0.5;
     }
 
-    // --- Main Loop ---
+    // --- main loop ---
 
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         totalBytes += value.length;
-        // Decode bytes to text and append to buffer tail
+        // decode bytes to text and append to buffer tail
         buffer += decoder.decode(value, { stream: true });
 
-        // Process buffer while we can
+        // process buffer while we can
         while (true) {
-            // STATE 1: Look for start of nodes list "nodes":[ (this is not an emoji)
+            // state 1: Look for start of nodes list "nodes":[ (this is not an emoji)
             if (state === 'SEARCH_NODES') {
                 const idx = buffer.indexOf('"nodes":[');
                 if (idx !== -1) {
-                    buffer = buffer.slice(idx + 9); // Skip header
+                    buffer = buffer.slice(idx + 9); // skip header
                     state = 'IN_NODES';
                 } else {
-                    // Keep only buffer tail in case key was split
+                    // keep only buffer tail in case key was split
                     if (buffer.length > 50) buffer = buffer.slice(-50);
-                    break; // Wait for more data
+                    break; // wait for more data
                 }
             }
 
-            // State 2 & 3: Read objects
+            // state 2 & 3: Read objects
             if (state === 'IN_NODES' || state === 'IN_LINKS') {
-                // Clean garbage (commas, spaces)
+                // clean garbage (commas, spaces)
                 buffer = buffer.trimStart();
                 if (buffer.startsWith(',')) buffer = buffer.slice(1).trimStart();
 
-                // Check for array end ']'
+                // check for array end ']'
                 if (buffer.startsWith(']')) {
                     buffer = buffer.slice(1);
-                    // If nodes finished -> look for links. If links finished -> done.
+                    // if nodes finished -> look for links. If links finished -> done.
                     state = (state === 'IN_NODES') ? 'SEARCH_LINKS' : 'DONE';
 
                     if (state === 'DONE') {
-                        // Return results
-                        // Trim arrays (.slice) to actual element count
+                        // return results
+                        // trim arrays (.slice) to actual element count
                         return {
                             nodeCount, linkCount,
                             x: xArr.slice(0, nodeCount),
@@ -132,11 +132,11 @@ export async function loadGraphStream(readableStream, onProgress) {
                     continue;
                 }
 
-                // Try to find full JSON object {...}
+                // try to find full JSON object {...}
                 if (buffer.startsWith('{')) {
-                    // We need to find the closing brace }
+                    // we need to find the closing brace }
                     // IMPORTANT: Cannot just search for '}' as it might be inside a label string.
-                    // Primitive brace balance scanner:
+                    // primitive brace balance scanner:
 
                     let endIdx = -1;
                     let braceCount = 0;
@@ -144,12 +144,12 @@ export async function loadGraphStream(readableStream, onProgress) {
 
                     for (let i = 0; i < buffer.length; i++) {
                         const char = buffer[i];
-                        // If we meet a quote and it's not escaped
+                        // if we meet a quote and it's not escaped
                         if (char === '"' && buffer[i - 1] !== '\\') {
                             inString = !inString;
                             continue;
                         }
-                        if (inString) continue; // Ignore braces inside string
+                        if (inString) continue; // ignore braces inside string
 
                         if (char === '{') braceCount++;
                         else if (char === '}') {
@@ -162,12 +162,12 @@ export async function loadGraphStream(readableStream, onProgress) {
                     }
 
                     if (endIdx !== -1) {
-                        // Yay, we have full text of one object
+                        // yay, we have full text of one object
                         const objStr = buffer.slice(0, endIdx + 1);
-                        buffer = buffer.slice(endIdx + 1); // Remove processed from buffer
+                        buffer = buffer.slice(endIdx + 1); // remove processed from buffer
 
                         try {
-                            // Parse only this small chunk
+                            // parse only this small chunk
                             const obj = JSON.parse(objStr);
 
                             if (state === 'IN_NODES') {
@@ -194,23 +194,23 @@ export async function loadGraphStream(readableStream, onProgress) {
                         } catch (e) {
                             console.warn("Skipping bad JSON chunk", e);
                         }
-                        continue; // Immediately look for next object
+                        continue; // immediately look for next object
                     } else {
-                        // Closing brace not found means object incomplete
-                        // Break inner loop, wait for next network chunk
+                        // closing brace not found means object incomplete
+                        // break inner loop, wait for next network chunk
                         break;
                     }
                 } else {
-                    // If we are here, buffer doesn't start with '{' or ']'.
-                    // Possibly in transition phase between arrays ("nodes": [...] , "links": [...])
+                    // if we are here, buffer doesn't start with '{' or ']'.
+                    // possibly in transition phase between arrays ("nodes": [...] , "links": [...])
                     if (buffer.indexOf('"links":[') !== -1) {
-                        // Skip garbage until links start
+                        // skip garbage until links start
                         let idx = buffer.indexOf('"links":[');
                         buffer = buffer.slice(idx + 9);
                         state = 'IN_LINKS';
                         continue;
                     }
-                    // If unclear - wait for data (or it's EOF)
+                    // if unclear - wait for data (or it's EOF)
                     break;
                 }
             }

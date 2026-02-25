@@ -1,0 +1,270 @@
+/* dark theme for "Pro" look :) */
+body {
+    margin: 0;
+    background: #000000;
+    color: #fff;
+    font-family: 'Roboto', sans-serif;
+    overflow: hidden;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.4);
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* fullscreen canvas layers */
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+/* WebGL layer at bottom (z-index 0 default) */
+#glcanvas {
+    z-index: 1;
+}
+
+/* text layer on top (pointer-events: none, to let clicks pass through) */
+#text-canvas {
+    z-index: 2;
+    pointer-events: none;
+}
+
+/* floating panels */
+.panel {
+    position: fixed;
+    top: 20px;
+    bottom: 20px;
+    z-index: 10;
+    display: flex;
+    align-items: flex-start;
+    transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.panel-content {
+    width: 280px;
+    background: rgba(20, 20, 20, 0.45);
+    /* Frosted glass look */
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-sizing: border-box;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+/* toggle button */
+.panel-toggle {
+    width: 30px;
+    height: 50px;
+    background: rgba(40, 40, 40, 0.5);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    padding: 0;
+    margin-top: 20px;
+    z-index: 11;
+    transition: all 0.2s ease;
+}
+
+.panel-toggle:hover {
+    background: rgba(80, 80, 80, 0.8);
+}
+
+/* left panel */
+#panel-left {
+    left: 20px;
+    flex-direction: row;
+}
+
+#panel-left .panel-toggle {
+    border-radius: 0 8px 8px 0;
+    border-left: none;
+}
+
+#panel-left.collapsed {
+    transform: translateX(-280px);
+}
+
+/* right panel */
+#panel-right {
+    right: 20px;
+    flex-direction: row;
+    display: none;
+    opacity: 0;
+    transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.8s ease-out;
+}
+
+#panel-right .panel-toggle {
+    border-radius: 8px 0 0 8px;
+    border-right: none;
+}
+
+#panel-right.collapsed {
+    transform: translateX(280px);
+}
+
+/* existing styles adapted */
+button {
+    width: 100%;
+    padding: 10px;
+    margin-top: 10px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: bold;
+    color: white;
+    transition: all 0.2s ease;
+}
+
+button:active {
+    transform: scale(0.96);
+}
+
+.btn-control {
+    width: auto;
+    padding: 8px 12px;
+    margin: 0;
+    background: rgba(255, 255, 255, 0.1);
+    color: #eee;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.btn-control:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+#btn-compute {
+    background: #3b82f6;
+}
+
+#btn-compute:hover {
+    background: #2563eb;
+}
+
+#btn-load-file {
+    background: #10b981;
+}
+
+#btn-load-file:hover {
+    background: #059669;
+}
+
+#btn-download:hover {
+    background: #7c3aed !important;
+}
+
+/* loading strip */
+#progress-container {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 15px;
+}
+
+#progress-bar {
+    height: 100%;
+    background: #3b82f6;
+    width: 0%;
+    transition: width 0.2s ease;
+}
+
+.section {
+    margin-bottom: 20px;
+}
+
+.label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #aaa;
+    font-weight: bold;
+}
+
+#status {
+    font-size: 13px;
+    margin-bottom: 10px;
+    color: #ccc;
+}
+
+/* search */
+#search-container {
+    margin-bottom: 15px;
+    position: relative;
+}
+
+#search-input {
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+#search-input:focus {
+    outline: none;
+    border-color: #3b82f6 !important;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+/* search results */
+#search-results {
+    position: fixed;
+    background: rgba(20, 20, 20, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    max-height: 60vh;
+    overflow-y: auto;
+    border-radius: 8px;
+    display: none;
+    z-index: 1000;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    margin-top: 5px;
+    color: #eee;
+    overflow-x: hidden;
+}
+
+.result-item {
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 13px;
+    transition: background 0.15s ease;
+}
+
+.result-item:hover {
+    background: rgba(59, 130, 246, 0.6);
+}
+
+.result-item:last-child {
+    border-bottom: none;
+}
