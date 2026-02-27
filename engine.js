@@ -132,8 +132,12 @@ export class GraphRenderer {
         this.centerX = (this.minX + this.maxX) / 2;
         this.centerY = (this.minY + this.maxY) / 2;
 
-        const width = this.maxX - this.minX;
-        const height = this.maxY - this.minY;
+        let width = this.maxX - this.minX;
+        let height = this.maxY - this.minY;
+
+        // Prevent layout collision when generating grids for 0-dimension point trees or edge cases.
+        if (width <= 0 || isNaN(width)) width = 1.0;
+        if (height <= 0 || isNaN(height)) height = 1.0;
 
         // 2. setup grid
         console.time("AdaptiveGrid");
@@ -504,13 +508,12 @@ export class GraphRenderer {
 
         const occupied = new Set();
         let drawn = 0;
-        const MAX_LABELS = 600;
-
+        const MAX_LABELS = 4000; // Increased to allow all nodes on larger topologies to show labels 
         // candidate collection
         const candidates = [];
 
         // target sorting pool
-        const targetCandidates = 2000;
+        const targetCandidates = 8000;
         const perChunk = Math.ceil(targetCandidates / (visibleChunks.length || 1));
 
         for (const chunk of visibleChunks) {

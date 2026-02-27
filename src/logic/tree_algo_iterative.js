@@ -5,9 +5,9 @@
 
 // configuration constants
 const DEFAULT_PARAMS = {
-    x_scale: 140.0,
+    x_scale: 80.0,
     min_level_gap: 56.0,
-    leaf_step: 400.0,
+    leaf_step: 600.0,
     parent_stub: 20.0,
     tip_pad: 40.0,
     weighted_stub: 40.0,
@@ -15,10 +15,10 @@ const DEFAULT_PARAMS = {
 };
 
 // geometry & colors
-const SIZE_LEAF_MARKER = 20.0;
-const SIZE_INTERNAL = 6.0;
-const SIZE_BEND = 3.0;
-const SIZE_LEAF_REAL = 8.0;
+const SIZE_LEAF_MARKER = 30.0;
+const SIZE_INTERNAL = 12.0;
+const SIZE_BEND = 6.0;
+const SIZE_LEAF_REAL = 25.0;
 
 const COLOR_LEAF = [0.96, 0.84, 0.43]; // #f5d76e
 const COLOR_INTERNAL = [0.54, 0.71, 0.97]; // #8ab4f8
@@ -210,8 +210,6 @@ export function parseNewick(text, onProgress) {
  */
 export function computeLayout(tree, onProgress) {
     const { count, parent, children, names, blens, root } = tree;
-    const { leaf_step } = DEFAULT_PARAMS;
-
     // a. compute X (cumulative distance)
 
     let dist = new Float32Array(count);
@@ -297,8 +295,11 @@ export function computeLayout(tree, onProgress) {
     }
 
     // assign Y to leaves
-    for (let i = 0; i < sortedLeaves.length; i++) {
-        y[sortedLeaves[i]] = i * leaf_step;
+    const numLeaves = sortedLeaves.length;
+    const dynamic_leaf_step = Math.max(60, Math.min(800, Math.pow(numLeaves, 0.6) * 15.0));
+
+    for (let i = 0; i < numLeaves; i++) {
+        y[sortedLeaves[i]] = i * dynamic_leaf_step;
     }
 
     // propagate Y up (post-order again)
@@ -322,12 +323,34 @@ export function buildVisualGraph(tree, layout, onProgress) {
     const { x: dist, y } = layout;
     const { x_scale, min_level_gap, parent_stub, tip_pad, weighted_stub } = DEFAULT_PARAMS;
 
+    let leaf_count = count - (count / 2); // Approximate leaves
+    let base_scale = Math.max(0.4, Math.min(45.0, Math.pow(leaf_count, 0.4) * 0.3));
+
+    // Scale X spreading dynamically based on density
+    let dynamic_x_scale = x_scale * base_scale;
+
+    // Scale points inversely based on density to keep dot dimensions clean
+    // Leaves get a stricter 0.4x cap on small trees (down from 0.9x) to prevent bloating
+    let leaf_scale_factor = Math.max(0.15, Math.min(0.4, 1.5 / Math.pow(leaf_count, 0.3)));
+    // Internal technical nodes cap a tiny bit smaller than they were (1.6x vs 2.0x)
+    let internal_scale_factor = Math.max(0.15, Math.min(0.6, 5.0 / Math.pow(leaf_count, 0.3)));
+
+
     // 1. x-scaling & stem spreading
     // collect all vertical stems: x_px + stub
 
     let rawStems = new Float32Array(count);
-    for (let i = 0; i < count; i++) {
-        rawStems[i] = dist[i] * x_scale + parent_stub;
+    let rawStack = [tree.root !== undefined ? tree.root : 0];
+    rawStems[rawStack[0]] = 0.0;
+    while (rawStack.length > 0) {
+        let u = rawStack.pop();
+        for (let i = 0; i < children[u].length; i++) {
+            let v = children[u][i];
+            let true_len_px = Math.max(0, blens[v]) * dynamic_x_scale;
+            let edge_len = Math.max(weighted_stub, true_len_px);
+            rawStems[v] = rawStems[u] + edge_len;
+            rawStack.push(v);
+        }
     }
 
     // robust quantization & spreading
@@ -422,9 +445,9 @@ export function buildVisualGraph(tree, layout, onProgress) {
         let label = names[u];
 
         let ex = getStemX(u);
-        let px = ex - parent_stub; // the 'node' is before the vertical drop
+        let px = ex; // the 'node' is placed ON the vertical drop
 
-        let size = isLeaf ? SIZE_LEAF_REAL : SIZE_INTERNAL;
+        let size = isLeaf ? (SIZE_LEAF_REAL * leaf_scale_factor) : (SIZE_INTERNAL * internal_scale_factor);
         let color = isLeaf ? COLOR_LEAF : COLOR_INTERNAL;
 
         // logical node ID -> visual point ID
@@ -442,32 +465,17 @@ export function buildVisualGraph(tree, layout, onProgress) {
         let py = y[u];
         let uPid = nodeToPoint[u];
 
-
-
         for (let v of kids) {
             let cy = y[v];
             let vPid = nodeToPoint[v];
 
-            // adjust child X: parentStem -> spread -> horizontal -> child
-
-            let true_len_px = Math.max(0, blens[v]) * x_scale;
-            let finalChildX = ex + weighted_stub + true_len_px;
-
-            // move the child point
-            outX[vPid] = finalChildX;
-
-            // bends
-            // 1. top elbow (ex, py)
-            let elbowTop = addPoint(ex, py, SIZE_BEND, COLOR_BEND, "");
-            addLink(uPid, elbowTop);
-
             if (Math.abs(py - cy) > 1e-5) {
                 // 2. bottom elbow (ex, cy)
-                let elbowBot = addPoint(ex, cy, SIZE_BEND, COLOR_BEND, "");
-                addLink(elbowTop, elbowBot);
+                let elbowBot = addPoint(ex, cy, SIZE_BEND * internal_scale_factor, COLOR_BEND, "");
+                addLink(uPid, elbowBot);
                 addLink(elbowBot, vPid);
             } else {
-                addLink(elbowTop, vPid);
+                addLink(uPid, vPid);
             }
         }
     }
@@ -491,7 +499,7 @@ export function buildVisualGraph(tree, layout, onProgress) {
             let lbl = outLabels[pid];
 
             // create marker
-            let mPid = addPoint(tipLineX, outY[pid], SIZE_LEAF_MARKER, COLOR_LEAF, lbl);
+            let mPid = addPoint(tipLineX, outY[pid], SIZE_LEAF_MARKER * leaf_scale_factor, COLOR_LEAF, lbl);
             addLink(mPid, pid);
         }
     }

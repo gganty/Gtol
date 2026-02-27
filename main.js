@@ -316,8 +316,12 @@ canvas.addEventListener('mousemove', e => {
 
 canvas.addEventListener('wheel', e => {
     e.preventDefault();
-    const zoomFactor = 1.035;
-    const direction = e.deltaY > 0 ? 1 / zoomFactor : zoomFactor;
+
+    // Smooth scrolling using dynamic delta for trackpads & mice
+    // Adjust scaling so negative delta zooms in, positive zooms out
+    const zoomSpeed = 0.0008;
+    const direction = Math.exp(-e.deltaY * zoomSpeed);
+
     const mx = e.clientX;
     const my = window.innerHeight - e.clientY;
     const wx = mx / transform.k - transform.x;
