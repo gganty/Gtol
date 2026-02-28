@@ -14,10 +14,17 @@ export const POINT_VS = `
   
   uniform vec2 u_resolution; // Global variable: Screen Width/Height
   uniform vec3 u_transform;  // Global variable: Pan X, Pan Y, Zoom Scale
+  uniform float u_is_circular; // Flag: circular sizing behavior
+  uniform float u_node_scale;  // Global Node UI Size Scale factor
   
   varying vec3 v_color;      // Output: Pass color to fragment shader
   
   void main() {
+    float final_size = a_size * u_node_scale;
+    if (u_is_circular > 0.5) {
+        final_size *= 0.25; // Reduce sizes heavily inside circular layouts
+    }
+  
     // 1. Apply Zoom and Pan (Matrix transformations manually)
     // Formula: (pos + translate) * scale
     vec2 pos = (a_position + u_transform.xy) * u_transform.z;
@@ -30,7 +37,7 @@ export const POINT_VS = `
     
     // gl_PointSize - built-in WebGL variable for point size
     // max(..., 2.0) ensures point doesn't disappear completely
-    gl_PointSize = max(a_size * u_transform.z, 2.0);
+    gl_PointSize = max(final_size * u_transform.z, 2.0);
     
     v_color = a_color;
   }
@@ -73,15 +80,44 @@ export const POINT_FS = `
 
 // Line shader
 export const LINE_VS = `
-  attribute vec2 a_position;
+  attribute float a_t;          // Base geometry (0.0 to 1.0)
+  attribute vec4 a_link_coords; // Instance data: [orig_x1, orig_y1, orig_x2, orig_y2]
+  
   uniform vec2 u_resolution;
   uniform vec3 u_transform;
+  uniform float u_is_circular;
 
-void main() {
-    vec2 pos = (a_position + u_transform.xy) * u_transform.z;
+  // Uniforms for polar transform parameters
+  uniform float u_hole_radius; 
+  uniform float u_scale_x;
+  uniform float u_max_y;
+
+  void main() {
+    float t = a_t;
+    
+    vec2 start = a_link_coords.xy;
+    vec2 end = a_link_coords.zw;
+
+    vec2 local_pos;
+
+    if (u_is_circular > 0.5) {
+        // Interpolate normalized original coordinates
+        vec2 curr_orig = mix(start, end, t);
+
+        // Apply polar transform (curr_orig.y is already normalized 0..1 in buffer)
+        float r = u_hole_radius + (curr_orig.x * u_scale_x);
+        float theta = curr_orig.y * 2.0 * 3.14159265359 - 1.57079632679;
+        
+        local_pos = vec2(r * cos(theta), r * sin(theta));
+    } else {
+        // Linear interpolation in chunk-relative Cartesian space
+        local_pos = mix(start, end, t);
+    }
+
+    vec2 pos = (local_pos + u_transform.xy) * u_transform.z;
     vec2 clip = (pos / u_resolution) * 2.0 - 1.0;
     gl_Position = vec4(clip, 0.0, 1.0);
-}
+  }
 `;
 
 export const LINE_FS = `

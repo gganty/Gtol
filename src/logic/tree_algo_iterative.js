@@ -212,7 +212,7 @@ export function computeLayout(tree, onProgress) {
     const { count, parent, children, names, blens, root } = tree;
     // a. compute X (cumulative distance)
 
-    let dist = new Float32Array(count);
+    let dist = new Float64Array(count);
     let stack = [root];
     dist[root] = 0.0;
 
@@ -234,7 +234,7 @@ export function computeLayout(tree, onProgress) {
     // 2. assign Y to leaves
     // 3. post-order calc internal Y (mean of children)
 
-    let y = new Float32Array(count);
+    let y = new Float64Array(count);
     let leaves = [];
 
     // iterative DFS to collect leaves
@@ -399,8 +399,8 @@ export function buildVisualGraph(tree, layout, onProgress) {
     const MAX_POINTS = count * 4;
 
     // structure of arrays (matches binary format)
-    let outX = new Float32Array(MAX_POINTS);
-    let outY = new Float32Array(MAX_POINTS);
+    let outX = new Float64Array(MAX_POINTS);
+    let outY = new Float64Array(MAX_POINTS);
     let outSize = new Float32Array(MAX_POINTS);
     let outR = new Float32Array(MAX_POINTS);
     let outG = new Float32Array(MAX_POINTS);

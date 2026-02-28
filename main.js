@@ -1,5 +1,5 @@
-import { GraphRenderer } from './engine.js';
-import { loadFromGTOL, saveToGTOLParts, loadFromGTOLFile } from './src/io/binary_format.js';
+import { GraphRenderer } from './engine.js?v=cw2';
+import { loadFromGTOL, saveToGTOLParts, loadFromGTOLFile } from './src/io/binary_format.js?v=cw2';
 
 // engine initialization
 const canvas = document.getElementById('glcanvas');
@@ -48,7 +48,7 @@ const memStatsEl = document.getElementById('memory-stats');
 const dlSection = document.getElementById('section-download');
 
 // --- worker setup ---
-const computeWorker = new Worker('./src/compute.worker.js', { type: 'module' });
+const computeWorker = new Worker('./src/compute.worker.js?v=cw2', { type: 'module' });
 
 computeWorker.onmessage = function (e) {
     const { type, stage, progress, result, error } = e.data;
@@ -193,7 +193,8 @@ document.getElementById('btn-download').addEventListener('click', () => {
 function loadDataToEngine(data) {
     console.log("[Main] loadDataToEngine called. Data keys:", Object.keys(data));
     currentData = data;
-    renderer.setData(data);
+    const isCircular = document.getElementById('layout-select').value === 'circular';
+    renderer.setData(data, isCircular);
 
     // init search worker
     const searchMsg = { type: 'INIT' };
@@ -276,6 +277,21 @@ function applyZoom(factor) {
     transform.y = my / transform.k - wy;
     renderer.setTransform(transform.x, transform.y, transform.k, false);
 }
+
+const layoutSelect = document.getElementById('layout-select');
+layoutSelect.addEventListener('change', (e) => {
+    if (!currentData || !renderer) return;
+    const isCircular = e.target.value === 'circular';
+    renderer.setData(currentData, isCircular);
+    fitToScreen(currentData);
+});
+
+const nodeSizeSlider = document.getElementById('node-size-slider');
+const nodeSizeLabel = document.getElementById('node-size-label');
+nodeSizeSlider.addEventListener('input', (e) => {
+    nodeSizeLabel.innerText = `${parseFloat(e.target.value).toFixed(1)}x`;
+    if (renderer) renderer.needsRender = true;
+});
 
 // --- UI panels ---
 const panelLeft = document.getElementById('panel-left');

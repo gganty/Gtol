@@ -1,4 +1,4 @@
-import { POINT_VS, POINT_FS, LINE_VS, LINE_FS } from './shaders.js';
+import { POINT_VS, POINT_FS, LINE_VS, LINE_FS } from './shaders.js?v=cw2';
 
 export class GraphRenderer {
     /**
@@ -22,29 +22,44 @@ export class GraphRenderer {
         this.programLine = this.createProgram(LINE_VS, LINE_FS);
 
         // attributes & uniforms (points)
-        this.locPos = this.gl.getAttribLocation(this.program, 'a_position');
         this.locSize = this.gl.getAttribLocation(this.program, 'a_size');
         this.locColor = this.gl.getAttribLocation(this.program, 'a_color');
         this.locRes = this.gl.getUniformLocation(this.program, 'u_resolution');
         this.locTrans = this.gl.getUniformLocation(this.program, 'u_transform');
         this.locIsLine = this.gl.getUniformLocation(this.program, 'u_is_line');
+        this.locIsCirc = this.gl.getUniformLocation(this.program, 'u_is_circular');
+        this.locNodeScale = this.gl.getUniformLocation(this.program, 'u_node_scale');
+
 
         // attributes & uniforms (lines)
-        this.locLinePos = this.gl.getAttribLocation(this.programLine, 'a_position');
+        this.locLineT = this.gl.getAttribLocation(this.programLine, 'a_t');
+        this.locLineCoords = this.gl.getAttribLocation(this.programLine, 'a_link_coords');
         this.locLineRes = this.gl.getUniformLocation(this.programLine, 'u_resolution');
         this.locLineTrans = this.gl.getUniformLocation(this.programLine, 'u_transform');
+        this.locLineIsCirc = this.gl.getUniformLocation(this.programLine, 'u_is_circular');
+        this.locLineHole = this.gl.getUniformLocation(this.programLine, 'u_hole_radius');
+        this.locLineScaleX = this.gl.getUniformLocation(this.programLine, 'u_scale_x');
+        this.locLineMaxY = this.gl.getUniformLocation(this.programLine, 'u_max_y');
 
         // buffers
         this.bufPos = this.gl.createBuffer();
         this.bufSize = this.gl.createBuffer();
         this.bufColor = this.gl.createBuffer();
         this.bufLinkPos = null;
+        this.bufLineT = this.gl.createBuffer();
+
+        const tData = new Float32Array(32);
+        for (let i = 0; i < 32; i++) tData[i] = i / 31.0;
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.bufLineT);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, tData, this.gl.STATIC_DRAW);
 
         this.gl.enable(this.gl.BLEND);
         this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
 
         // extension for indices > 65535
         this.ext = this.gl.getExtension('OES_element_index_uint');
+        this.extInstanced = this.gl.getExtension('ANGLE_instanced_arrays');
+        if (!this.extInstanced) console.warn("ANGLE_instanced_arrays not supported!");
 
         this.ctx = null;
         this.transform = { x: 0, y: 0, k: 1.0 };
@@ -102,10 +117,72 @@ export class GraphRenderer {
      * Prepares spatial alignment and sorting for efficient rendering.
      * @param {Object} data - Object containing typed arrays of node/link data.
      */
-    setData(data) {
+    setData(data, isCircular = false) {
         const gl = this.gl;
         this.nodeCount = data.nodeCount;
         this.linkCount = data.linkCount;
+        this.isCircular = isCircular;
+        this.polarParams = null;
+
+        // lazy saving of original coordinates on first load
+        if (!data.origX) {
+            data.origX = new Float64Array(data.x);
+            data.origY = new Float64Array(data.y);
+        }
+
+        if (isCircular) {
+            let maxY_orig = -Infinity;
+            let maxX_orig = -Infinity;
+            // searching for max in original data
+            for (let i = 0; i < this.nodeCount; i++) {
+                if (data.origY[i] > maxY_orig) maxY_orig = data.origY[i];
+                if (data.origX[i] > maxX_orig) maxX_orig = data.origX[i];
+            }
+
+            // --- FIX SCALE ---
+            // To prevent nodes from clumping, the length of the outer circumference 
+            // should equal the original tree height.
+            // 2 * PI * R_max = maxY_orig  =>  R_max = maxY_orig / (2 * PI)
+            const R_max = maxY_orig / (2.0 * Math.PI);
+
+            // Smart Scaling for 1M+ nodes. 
+            // The more nodes, the larger the center hole needs to be to fit the diverging branches.
+            // Using a logarithmic scale mapped between 10% (small trees) and 300%+ (huge trees)
+            // Math.max guarantees at least 0.1 for small graphs.
+            let holeMultiplier = 0.1;
+            if (this.nodeCount > 500) {
+                // Formula: ln(nodeCount / 500) * 0.4 + 0.1
+                // Example values:
+                // 10K nodes: ln(20) * 0.4 + 0.1 ≈ 1.3 (130%)
+                // 1M nodes: ln(2000) * 0.4 + 0.1 ≈ 3.14 (314%)
+                holeMultiplier = Math.max(0.1, Math.log(this.nodeCount / 500.0) * 0.4 + 0.1);
+            }
+
+            const HOLE_RADIUS = R_max * holeMultiplier;
+
+            // Branch stretch coefficient along radius (X)
+            // Ensure the tree thickness itself is always pushed outwards (positively), 
+            // no matter how large the inner hole radius becomes.
+            const thickness = R_max * 0.9;
+            const scaleX = thickness / (maxX_orig > 0 ? maxX_orig : 1) * 2.5;
+
+            this.polarParams = { holeRadius: HOLE_RADIUS, scaleX: scaleX, maxY: maxY_orig };
+
+            for (let i = 0; i < this.nodeCount; i++) {
+                // New radius with proportional scaling
+                const r = HOLE_RADIUS + (data.origX[i] * scaleX);
+
+                // Angle
+                const theta = (data.origY[i] / maxY_orig) * 2.0 * Math.PI - (Math.PI / 2.0);
+
+                data.x[i] = r * Math.cos(theta);
+                data.y[i] = r * Math.sin(theta);
+            }
+        } else {
+            // restore original coordinates
+            data.x.set(data.origX);
+            data.y.set(data.origY);
+        }
 
         // save references for labels (original order)
         this.dataX = data.x;
@@ -251,14 +328,19 @@ export class GraphRenderer {
 
             // c. sort links
             this.bufLinkPos = gl.createBuffer();
-            const linkPos = new Float32Array(this.linkCount * 4);
+            let linkPos;
+            if (this.isCircular) {
+                linkPos = new Float32Array(this.linkCount * 4);
+            } else {
+                linkPos = new Float32Array(this.linkCount * 4); // same size for layout toggle compatibility
+            }
             const currLinkOffsets = new Uint32Array(linkOffsets);
 
             for (let i = 0; i < this.linkCount; i++) {
                 const s = data.linkSrc[i];
                 const t = data.linkTgt[i];
 
-                // Identify chunk
+                // Identify chunk (ALWAYS visually mapped, x/y is active spatial bounding)
                 const sx = data.x[s];
                 const sy = data.y[s];
                 const tx = data.x[t];
@@ -271,16 +353,23 @@ export class GraphRenderer {
                 const ptr = currLinkOffsets[cIdx]++;
                 const offset = ptr * 4;
 
-                // store relative to chunk origin
-                // x1, y1 (Source)
-                linkPos[offset] = sx - chunk.x1;
-                linkPos[offset + 1] = sy - chunk.y1;
-
-                // x2, y2 (Target)
-                linkPos[offset + 2] = tx - chunk.x1;
-                linkPos[offset + 3] = ty - chunk.y1;
+                if (this.isCircular) {
+                    // Store absolute pre-polar (Cartesian original) coordinates for instancing
+                    linkPos[offset] = data.origX[s];
+                    linkPos[offset + 1] = data.origY[s] / this.polarParams.maxY;
+                    linkPos[offset + 2] = data.origX[t];
+                    linkPos[offset + 3] = data.origY[t] / this.polarParams.maxY;
+                } else {
+                    // Store relative Cartesian coordinates directly for Manhattan chunks
+                    linkPos[offset] = sx - chunk.x1;
+                    linkPos[offset + 1] = sy - chunk.y1;
+                    linkPos[offset + 2] = tx - chunk.x1;
+                    linkPos[offset + 3] = ty - chunk.y1;
+                }
 
                 // update chunk edge bounds (include both source and target)
+                // Use the visual projected coordinates (data.x / data.y) because the camera
+                // culling frustum checks against the final visual space
                 if (sx < chunk.linkMinX) chunk.linkMinX = sx;
                 if (sx > chunk.linkMaxX) chunk.linkMaxX = sx;
                 if (sy < chunk.linkMinY) chunk.linkMinY = sy;
@@ -422,23 +511,76 @@ export class GraphRenderer {
         // 4. draw
 
         // pass 1: lines
-        if (potentialPoints < 500000 && this.bufLinkPos) {
+        // Drawing edges on 28M node trees natively requires raising the cut-off
+        if (potentialPoints < 8000000 && this.bufLinkPos) {
             gl.useProgram(this.programLine);
             gl.uniform2f(this.locLineRes, w, h);
+            gl.uniform1f(this.locLineIsCirc, this.isCircular ? 1.0 : 0.0);
 
+            if (this.isCircular && this.polarParams) {
+                gl.uniform1f(this.locLineHole, this.polarParams.holeRadius);
+                gl.uniform1f(this.locLineScaleX, this.polarParams.scaleX);
+                gl.uniform1f(this.locLineMaxY, this.polarParams.maxY);
+            }
+
+            // Bind base geometry a_t
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.bufLineT);
+            gl.vertexAttribPointer(this.locLineT, 1, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(this.locLineT);
+            if (this.extInstanced) {
+                this.extInstanced.vertexAttribDivisorANGLE(this.locLineT, 0);
+            }
+
+            // Bind instance geometry a_link_coords or a_position equivalent depending on shader usage
             gl.bindBuffer(gl.ARRAY_BUFFER, this.bufLinkPos);
-            gl.vertexAttribPointer(this.locLinePos, 2, gl.FLOAT, false, 0, 0);
-            gl.enableVertexAttribArray(this.locLinePos);
 
-            for (const chunk of visibleLinkChunks) {
-                if (!chunk.linkCount) continue;
+            if (this.isCircular && this.extInstanced) {
+                const bytesPerInstance = 16; // 4 floats * 4 bytes
 
-                // chunk relative translation for lines
-                const chunkTx = tx + chunk.x1;
-                const chunkTy = ty + chunk.y1;
+                for (const chunk of visibleLinkChunks) {
+                    if (!chunk.linkCount) continue;
 
-                gl.uniform3f(this.locLineTrans, chunkTx, chunkTy, physK);
-                gl.drawArrays(gl.LINES, chunk.linkStartIndex * 2, chunk.linkCount * 2);
+                    // Lines are absolute, apply only global pan
+                    gl.uniform3f(this.locLineTrans, tx, ty, physK);
+
+                    gl.vertexAttribPointer(this.locLineCoords, 4, gl.FLOAT, false, 0, chunk.linkStartIndex * bytesPerInstance);
+                    gl.enableVertexAttribArray(this.locLineCoords);
+                    this.extInstanced.vertexAttribDivisorANGLE(this.locLineCoords, 1);
+
+                    this.extInstanced.drawArraysInstancedANGLE(gl.LINE_STRIP, 0, 32, chunk.linkCount);
+                }
+
+                this.extInstanced.vertexAttribDivisorANGLE(this.locLineCoords, 0);
+            } else {
+                // Cartesian Manhattan layout: standard chunk-relative drawing
+                const bytesPerVertex = 8; // 2 floats * 4 bytes (mapping back coordinates out of packed buffer layout)
+
+                // Set `a_link_coords` pointer to mimic packed pairs or switch to simple `a_link_coords.xy` usage in `LINE_VS`:
+                // We packed it as [sx, sy, tx, ty] => 1 line = 2 points. Let's just draw them correctly
+                // To reuse LINE_VS (which reads vec4 a_link_coords and uses .xy .zw), we can set divisor=1 and draw 2 points via t parameter?
+                // Wait, if it's not circular, LINE_VS uses local_pos = mix(start, end, t), so we actually CAN use the exact same instanced call!
+
+                if (this.extInstanced) {
+                    const bytesPerInstance = 16;
+                    for (const chunk of visibleLinkChunks) {
+                        if (!chunk.linkCount) continue;
+
+                        // Cartesian lines are relative to chunk, apply global pan + local translation
+                        const chunkTx = tx + chunk.x1;
+                        const chunkTy = ty + chunk.y1;
+                        gl.uniform3f(this.locLineTrans, chunkTx, chunkTy, physK);
+
+                        gl.vertexAttribPointer(this.locLineCoords, 4, gl.FLOAT, false, 0, chunk.linkStartIndex * bytesPerInstance);
+                        gl.enableVertexAttribArray(this.locLineCoords);
+                        this.extInstanced.vertexAttribDivisorANGLE(this.locLineCoords, 1);
+
+                        // Draw lines as instanced segments (using 32 instances of base geometry 0..1 to match circular divisor state)
+                        // This matches LINE_VS which reads start/end from vec4 and interpolates 
+                        // linearly when u_is_circular is 0.0 using `mix(start, end, t)`
+                        this.extInstanced.drawArraysInstancedANGLE(gl.LINE_STRIP, 0, 32, chunk.linkCount);
+                    }
+                    this.extInstanced.vertexAttribDivisorANGLE(this.locLineCoords, 0);
+                }
             }
         }
 
@@ -446,6 +588,11 @@ export class GraphRenderer {
         gl.useProgram(this.program);
         gl.uniform2f(this.locRes, w, h);
         gl.uniform1i(this.locIsLine, 0);
+        gl.uniform1f(this.locIsCirc, this.isCircular ? 1.0 : 0.0);
+        // Fetch UI Scaling Slider Value dynamically per-frame
+        const scaleVal = parseFloat(document.getElementById('node-size-slider').value) || 1.0;
+        gl.uniform1f(this.locNodeScale, scaleVal);
+
 
         // bind buffers
         gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
